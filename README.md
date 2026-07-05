@@ -1,143 +1,152 @@
-<div align="center">
+# VRCX Docker Headless
 
-# <img src="https://raw.githubusercontent.com/vrcx-team/VRCX/master/images/VRCX.ico" width="64" height="64"> </img> VRCX
+这是一个面向 Docker 部署的 VRCX headless fork。后端长期运行在 Docker 容器内，浏览器只作为 UI 访问；即使浏览器页面关闭，后端也会继续保持登录状态、监听 VRChat 服务器事件、接收本地 VRChat 日志流并维护数据库。
 
-[![GitHub release](https://img.shields.io/github/release/vrcx-team/VRCX.svg)](https://github.com/vrcx-team/VRCX/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/vrcx-team/VRCX/total?color=6451f1)](https://github.com/vrcx-team/VRCX/releases/latest)
-[![GitHub Workflow Status](https://github.com/vrcx-team/VRCX/actions/workflows/github_actions.yml/badge.svg)](https://github.com/vrcx-team/VRCX/actions/workflows/github_actions.yml)
-[![VRCX Discord Invite](https://img.shields.io/discord/854071236363550763?color=%237289DA&logo=discord&logoColor=white&label=discord)](https://vrcx.app/discord)
+本仓库不是官方 VRCX 发布版。上游桌面版项目见 [vrcx-team/VRCX](https://github.com/vrcx-team/VRCX)。
 
-| **English** | [Français](./README/README.fr.md) | [日本語](./README/README.jp.md) | [简体中文](./README/README.zh_CN.md) | [Italiano](./README/README.it.md) | [Русский](./README/README.ru_RU.md) | [Español](./README/README.es.md) | [Polski](./README/README.pl.md) | [ภาษาไทย](./README/README.th.md) | [Magyar](./README/README.hu.md)
+## 运行方式
 
-VRCX is an assistant/companion application for VRChat that provides information about and helps you accomplish various things related to VRChat in a more convenient fashion than relying on the plain VRChat client (desktop or VR), or website alone. It also includes some other neat features outlined below.
+- 后端：Node.js headless server，运行在 Docker 内。
+- 前端：浏览器访问容器提供的 Web UI。
+- 持久化：SQLite、登录态、缓存和配置写入数据目录，默认是 `./data`。
+- 日志流：Windows VRChat 客户端可运行 `vrcx-log-streamer`，把本机 VRChat 日志发送到远端 Docker 后端。
+- 架构：前端不承载服务逻辑；浏览器离线不会影响后端维护登录、WebSocket、feed、friend log、game log 和 instance activity。
 
-# Getting Started
+## 快速开始
 
-<div align="center">
+需要安装 Docker 和 Docker Compose。
 
-Download and install the latest installer (`VRCX_Setup.exe`) from [here](https://github.com/vrcx-team/VRCX/releases/latest).
+```bash
+git clone https://github.com/jerryhu07/VRCX-docker.git
+cd VRCX-docker
+cp .env.example .env
+docker compose up -d --build
+```
 
-For macOS and Linux check [here](https://github.com/vrcx-team/VRCX/wiki/Running-VRCX-on-Linux) for more info.
+打开：
 
-Beta/nightly build available [here](https://vrcx.app/github/nightly) or in-app `Settings -> General -> Change build`.
+```text
+http://127.0.0.1:18080/
+```
 
-# Features
+首次使用在浏览器内完成 VRChat 登录和 2FA。登录态会保存在 `VRCX_DATA_DIR` 指向的数据目录中。
 
-<div align="left">
+## 配置
 
-- :family: Friend, world, and avatar list management
-  - Manage your friends list, world/group/avatar lists outside of VRChat.
-  - Monitor the activity of your friends and track their online status, locations, and avatars.
-  - Track friendship history including add dates, time spent together, and name changes.
-  - Save notes and memos to help remember how you met.
-- :bar_chart: Customizable Dashboard with widgets
-  - Build personalized multi-panel layouts with Feed, GameLog, and Instance widgets.
-  - Create multiple dashboards, each with configurable event filters and column visibility.
-- :mag: Powerful search across all entities
-  - Search for users, worlds, avatars, and groups, or paste IDs and URLs for direct access.
-  - Quick Search provides instant client-side fuzzy search across your friends, avatars, worlds, and groups.
-- :chart_with_upwards_trend: Activity Heatmap
-  - Visualize a user's online activity patterns with a day-of-week × hour-of-day heatmap, including peak stats.
-- :camera: Store world data in the pictures you take in-game, so you can remember that one world you took those cool pictures in like... 6 months ago!
-- :bell: Monitor/respond to notifications
-  - You can send/receive invites and friend requests from VRCX as well as see the instance info of invites that you receive.
-- :scroll: See stats/players for your current instance
-- :tv: See the links to videos that are playing in the world you're in, as well as various other logged data.
-- :performing_arts: Social Status Presets
-  - Save and quickly apply status + status description combinations from the sidebar or user dialog.
-- :rotating_light: VRChat Server Status
-  - A status bar indicator and login page alert inform you of VRChat server issues and outages in real time.
-- :bar_chart: Improved Discord Rich Presence
-  - Display detailed instance information in Discord, including world thumbnail, name, player count, and a join button for public lobbies.
-- :crystal_ball: VR Overlay with configurable live feed of all supported events/notifications
-- :outbox_tray: Upload and manage avatar/world images and details without Unity
-- :electric_plug: Automatically launch apps when you start VRChat
-- :skull: Automatically restart and join last instance when VRC crashes
-- :left_right_arrow: Export/import data
-  - Export friends list, avatar list, Discord names, notes, and favorite groups. Import favorite groups and group moderation bans.
+`.env.example` 提供了常用配置：
 
-## Miscellaneous
+```env
+VRCX_HOST_PORT=18080
+VRCX_DATA_DIR=./data
+VRCX_LOG_STREAM_TOKEN=
+VRCX_LOG_STREAM_ALLOW_TOKEN_READ=1
+```
 
-- Want a new look for VRCX? Check out [Themes](https://github.com/vrcx-team/VRCX/wiki/Themes)
-- See [Building from source](https://github.com/vrcx-team/VRCX/wiki/Building-from-source) for instructions on how to build VRCX from source.
-- For a guide on how to run VRCX on Linux, see [here](https://github.com/vrcx-team/VRCX/wiki/Running-VRCX-on-Linux)
-- Interested in contributing? See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for guidelines.
+变量说明：
 
-# Screenshots
+- `VRCX_HOST_PORT`：宿主机暴露端口，默认 `18080`。
+- `VRCX_DATA_DIR`：持久化数据目录，默认 `./data`。
+- `VRCX_LOG_STREAM_TOKEN`：Windows 日志 streamer 连接后端时使用的 token。留空时后端可生成或复用当前 token。
+- `VRCX_LOG_STREAM_ALLOW_TOKEN_READ`：默认 `1`，允许从后端读取日志 streamer token，方便客户端配置。
 
-<div align="center">
+不要删除或覆盖数据目录，否则 SQLite 数据库、登录态和历史日志会丢失。迁移服务器时，把该目录一起复制过去。
 
-<h3>Login</h3>
+## 常用命令
 
-<table>
-  <tr>
-    <td align="center"><img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251994190-5e6a961e-b2fe-4d3b-bf66-455d8626b8bf.png" alt="login"></td>
-    <td align="center"><img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251994414-a21faf59-6199-45de-94e7-a093a6b8c0ac.png" alt="2fa"></td>
-  </tr>
-</table>
+```bash
+docker compose up -d --build
+docker compose logs -f
+docker compose ps
+docker compose down
+```
 
-<h3>Feed</h3>
+健康检查：
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251987020-9839a2c9-47db-4271-b1bf-8e07669a7056.png" alt="feed">
+```bash
+curl http://127.0.0.1:18080/healthz
+```
 
-<h3>GameLog</h3>
+读取日志 streamer token：
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251987498-b82266ed-131d-42ad-be2f-b167f24acf9f.png" alt="gamelog">
+```bash
+curl http://127.0.0.1:18080/headless/log-stream/token
+```
 
-<h3>UserInfo</h3>
+## 多架构构建
 
-<h4>Me</h4>
+本项目应能在 `linux/amd64` 和 `linux/arm64` 上构建。
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251990237-0c863d27-141c-4447-82de-4279ab8973ea.png" alt="me">
+单平台本机构建：
 
-<h4>Friend</h4>
+```bash
+docker build -t vrcx-headless:local .
+```
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251989666-8f918786-e632-451d-be29-f92d2c681b80.png" alt="friend">
+使用 buildx 验证 amd64：
 
-<h3>World</h3>
+```bash
+docker buildx build --platform linux/amd64 -t vrcx-headless:amd64 --load .
+```
 
-<table>
-  <tr>
-    <td align="center"><img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251991003-37a986bb-470c-442b-8ada-31918f7b2017.png" alt="instance"></td>
-    <td align="center"><img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251991217-0d40846f-ac08-48c0-8e4d-18c35fe0999b.png" alt="info"></td>
-  </tr>
-</table>
+使用 buildx 验证 arm64：
 
-<h3>Favorite</h3>
+```bash
+docker buildx build --platform linux/arm64 -t vrcx-headless:arm64 --load .
+```
 
-<h4>Friend</h4>
+如果当前宿主机架构和目标架构不同，需要 Docker 已启用对应的 emulation/binfmt 支持。
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251992424-ba406d0f-787e-4e2d-89bd-4caa0a05d31f.png" alt="friend">
+## Windows VRChat 日志 Streamer
 
-<h4>World</h4>
+Windows 客户端不需要安装 Node.js。可以使用打包后的 `vrcx-log-streamer-win-x64.exe`，也可以从源码重新打包：
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251992950-8f2c6cdc-dc9a-4a60-b59f-9fa80d071359.png" alt="world">
+```bash
+npm run build:log-streamer:win-x64
+```
 
-<h4>Avatar</h4>
+典型运行方式：
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251993408-66d11100-15a8-484f-b9fd-82be1516c9be.png" alt="avatar">
+```powershell
+.\vrcx-log-streamer-win-x64.exe --server http://SERVER_IP:18080 --token YOUR_TOKEN
+```
 
-<h3>Friend Log</h3>
+streamer 会读取本机 VRChat 日志，把 game log、friend location、instance activity 所需事件推送到 Docker 后端。后端负责解析、入库和广播给前端；浏览器不需要在线。
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251993741-e2033095-4ceb-4552-8b79-9285325c1e49.png" alt="friendlog">
+历史日志处理是防御性的：启动时可选择补传历史日志或跳过，避免把明显异常或过旧的数据误写入当前活动记录。
 
-<h3>Discord Rich Presence</h3>
+## 远端部署建议
 
-<img src="https://github-production-user-asset-6210df.s3.amazonaws.com/82102170/251997318-5a71249c-59fc-4ad6-9194-d6b1d4165600.png" alt="discord">
+在服务器上：
 
-<!-- The other images will be similar to this -->
-</div>
+```bash
+git clone https://github.com/jerryhu07/VRCX-docker.git /opt/vrcx-headless
+cd /opt/vrcx-headless
+cp .env.example .env
+docker compose up -d --build
+```
 
-## Is VRCX against VRChat's TOS?
+如果部署在公网，建议放在 HTTPS 反向代理后面，并限制访问来源。`VRCX_LOG_STREAM_TOKEN` 等同于写入日志数据的凭据，不要公开泄露。
 
-**No.**
+## 故障排查
 
-VRCX is an external tool that uses the VRChat API to provide the features it does.
+- 页面左下角显示 WebSocket 断开：先检查 `docker compose logs -f` 和 `/healthz`，确认后端仍在运行。
+- 刷新页面才看到 feed 更新：检查浏览器是否能访问后端 WebSocket，反向代理需要支持 WebSocket upgrade。
+- 重启后数据丢失：确认 `VRCX_DATA_DIR` 已挂载到宿主机持久化目录。
+- instance activity 缺数据：确认 Windows streamer 正在运行，且 VRChat 日志路径可读。
 
-It does not modify the game in any way, only using the API responsibly to provide the features it does. It is not a mod, or a cheat, or any other form of modification to the game.
+## 开发
 
-To see VRChat's stance on API usage, see the #faq channel in the VRChat Discord.
+常用验证命令：
 
----
+```bash
+npm test
+npm run prod-linux
+docker compose build
+```
 
-VRCX is not endorsed by VRChat and does not reflect the views or opinions of VRChat or anyone officially involved in producing or managing VRChat properties. VRChat and all associated properties are trademarks or registered trademarks of VRChat Inc. VRChat © VRChat Inc.
+与 instance activity、game log 相关的核心逻辑在：
+
+- `src/services/database/gameLog.js`
+- `src/services/headlessBridge.js`
+- `headless/server.js`
+- `tools/log-streamer/log-streamer.js`
