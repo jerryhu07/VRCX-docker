@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+build
+dist
+node_modules
+data
+npm-debug.log*
+Dockerfile
+docker-compose.yml
+*.AppImage
+*.dmg
+*.zip
+*.tar.gz
+Dotnet/**/bin
+Dotnet/**/obj
+Dotnet/obj*

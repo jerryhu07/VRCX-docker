@@ -1542,7 +1542,9 @@ const gameLog = {
                     display_name: row[3],
                     location: row[4],
                     user_id: row[5],
-                    time: row[6]
+                    time: row[6],
+                    still_present_at_self_leave: !!row[7],
+                    present_at_self_join: !!row[8]
                 };
 
                 // skip dirty data
@@ -1560,18 +1562,320 @@ const gameLog = {
                     rowData
                 ]);
             },
-            `SELECT
-                     *
-                FROM
-                    gamelog_join_leave
-                WHERE type = 'OnPlayerLeft'
-                    AND (
-                        strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '-' || (time * 1.0 / 1000) || ' seconds') BETWEEN @utc_start_date AND @utc_end_date
-                        OR created_at BETWEEN @utc_start_date AND @utc_end_date
-                    );`,
+            `WITH self_join_candidates AS (
+                    SELECT
+                        self_join.id AS first_self_join_id,
+                        self_join.created_at AS join_at,
+                        self_join.location,
+                        self_join.display_name,
+                        self_join.user_id
+                    FROM gamelog_join_leave self_join
+                    WHERE self_join.type = 'OnPlayerJoined'
+                        AND self_join.user_id = @current_user_id
+                        AND self_join.location != ''
+                        AND self_join.location != 'traveling'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM gamelog_join_leave previous_self_join
+                            WHERE previous_self_join.type = 'OnPlayerJoined'
+                                AND previous_self_join.user_id = @current_user_id
+                                AND previous_self_join.location = self_join.location
+                                AND previous_self_join.id < self_join.id
+                                AND previous_self_join.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', self_join.created_at, '-90 seconds')
+                        )
+                ),
+                fallback_self_sessions AS (
+                    SELECT
+                        left_event.id,
+                        left_event.created_at AS leave_at,
+                        self.location,
+                        CAST(MAX(0, ROUND((julianday(left_event.created_at) - julianday(self.join_at)) * 86400000)) AS INTEGER) AS time,
+                        self.join_at,
+                        self.display_name,
+                        self.user_id
+                    FROM self_join_candidates self
+                    INNER JOIN gamelog_join_leave left_event
+                        ON left_event.type = 'OnPlayerLeft'
+                        AND left_event.user_id = @current_user_id
+                        AND left_event.id > self.first_self_join_id
+                        AND (
+                            left_event.location = ''
+                            OR left_event.location = 'traveling'
+                        )
+                        AND (
+                            left_event.time <= 0
+                            OR ABS(
+                                (
+                                    julianday(strftime('%Y-%m-%dT%H:%M:%fZ', left_event.created_at, '-' || (left_event.time * 1.0 / 1000) || ' seconds'))
+                                    - julianday(self.join_at)
+                                ) * 86400
+                            ) <= 10
+                        )
+                        AND left_event.id = (
+                            SELECT MIN(candidate_left.id)
+                            FROM gamelog_join_leave candidate_left
+                            WHERE candidate_left.type = 'OnPlayerLeft'
+                                AND candidate_left.user_id = @current_user_id
+                                AND candidate_left.id > self.first_self_join_id
+                                AND (
+                                    candidate_left.location = ''
+                                    OR candidate_left.location = 'traveling'
+                                )
+                                AND (
+                                    candidate_left.time <= 0
+                                    OR ABS(
+                                        (
+                                            julianday(strftime('%Y-%m-%dT%H:%M:%fZ', candidate_left.created_at, '-' || (candidate_left.time * 1.0 / 1000) || ' seconds'))
+                                            - julianday(self.join_at)
+                                        ) * 86400
+                                    ) <= 10
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM gamelog_join_leave next_self_join
+                                    WHERE next_self_join.type = 'OnPlayerJoined'
+                                        AND next_self_join.user_id = @current_user_id
+                                        AND next_self_join.location != self.location
+                                        AND next_self_join.id > self.first_self_join_id
+                                        AND next_self_join.id < candidate_left.id
+                                )
+                        )
+                    WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM gamelog_join_leave same_location_left
+                            WHERE same_location_left.type = 'OnPlayerLeft'
+                                AND same_location_left.user_id = @current_user_id
+                                AND same_location_left.location = self.location
+                                AND same_location_left.id > self.first_self_join_id
+                                AND same_location_left.id < left_event.id
+                        )
+                        AND (
+                            self.join_at BETWEEN @utc_start_date AND @utc_end_date
+                            OR left_event.created_at BETWEEN @utc_start_date AND @utc_end_date
+                        )
+                ),
+                selected_self_sessions AS (
+                    SELECT
+                        id,
+                        created_at AS leave_at,
+                        location,
+                        time,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-' || (time * 1.0 / 1000) || ' seconds') AS join_at,
+                        display_name,
+                        user_id
+                    FROM gamelog_join_leave
+                    WHERE type = 'OnPlayerLeft'
+                        AND user_id = @current_user_id
+                        AND location != ''
+                        AND location != 'traveling'
+                        AND (
+                            strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '-' || (time * 1.0 / 1000) || ' seconds') BETWEEN @utc_start_date AND @utc_end_date
+                            OR created_at BETWEEN @utc_start_date AND @utc_end_date
+                        )
+                    UNION ALL
+                    SELECT
+                        id,
+                        leave_at,
+                        location,
+                        time,
+                        join_at,
+                        display_name,
+                        user_id
+                    FROM fallback_self_sessions
+                ),
+                self_join_starts AS (
+                    SELECT
+                        self.*,
+                        (
+                            SELECT MIN(self_join.id)
+                            FROM gamelog_join_leave self_join
+                            WHERE self_join.location = self.location
+                                AND self_join.type = 'OnPlayerJoined'
+                                AND self_join.user_id = @current_user_id
+                                AND ABS((julianday(self_join.created_at) - julianday(self.join_at)) * 86400) <= 5
+                        ) AS first_self_join_id
+                    FROM selected_self_sessions self
+                ),
+                self_join_bounds AS (
+                    SELECT
+                        self.*,
+                        (
+                            SELECT MIN(self_join.id)
+                            FROM gamelog_join_leave self_join
+                            WHERE self_join.location = self.location
+                                AND self_join.type = 'OnPlayerJoined'
+                                AND self_join.user_id = @current_user_id
+                                AND self_join.id > self.first_self_join_id
+                                AND self_join.created_at <= self.leave_at
+                                AND self_join.created_at <= strftime('%Y-%m-%dT%H:%M:%fZ', self.join_at, '+90 seconds')
+                        ) AS second_self_join_id
+                    FROM self_join_starts self
+                ),
+                present_at_self_join_rows AS (
+                    SELECT
+                        self.id AS self_session_id,
+                        joined.id AS joined_id
+                    FROM self_join_bounds self
+                    INNER JOIN gamelog_join_leave joined
+                        ON joined.location = self.location
+                        AND joined.type = 'OnPlayerJoined'
+                        AND joined.user_id != @current_user_id
+                        AND self.first_self_join_id IS NOT NULL
+                        AND self.second_self_join_id IS NOT NULL
+                        AND joined.id > self.first_self_join_id
+                        AND joined.id < self.second_self_join_id
+                ),
+                self_rows AS (
+                    SELECT
+                        self.id,
+                        self.leave_at AS created_at,
+                        'OnPlayerLeft' AS type,
+                        self.display_name,
+                        self.location,
+                        self.user_id,
+                        self.time,
+                        0 AS still_present_at_self_leave,
+                        0 AS present_at_self_join
+                    FROM self_join_bounds self
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM gamelog_join_leave left_event
+                        WHERE left_event.id = self.id
+                            AND left_event.type = 'OnPlayerLeft'
+                            AND left_event.user_id = @current_user_id
+                            AND left_event.location = self.location
+                    )
+                ),
+                left_rows AS (
+                    SELECT
+                        left_event.id,
+                        left_event.created_at,
+                        left_event.type,
+                        left_event.display_name,
+                        left_event.location,
+                        left_event.user_id,
+                        CASE
+                            WHEN joined.id IS NOT NULL
+                                AND present_at_self_join.joined_id IS NOT NULL
+                                THEN CAST(MAX(0, ROUND((julianday(left_event.created_at) - julianday(self.join_at)) * 86400000)) AS INTEGER)
+                            ELSE left_event.time
+                        END AS time,
+                        0 AS still_present_at_self_leave,
+                        CASE
+                            WHEN joined.id IS NOT NULL
+                                AND present_at_self_join.joined_id IS NOT NULL
+                                THEN 1
+                            ELSE 0
+                        END AS present_at_self_join
+                    FROM self_join_bounds self
+                    INNER JOIN gamelog_join_leave left_event
+                        ON left_event.location = self.location
+                        AND left_event.type = 'OnPlayerLeft'
+                        AND left_event.created_at >= self.join_at
+                        AND left_event.created_at <= self.leave_at
+                    LEFT JOIN gamelog_join_leave joined
+                        ON joined.location = left_event.location
+                        AND joined.type = 'OnPlayerJoined'
+                        AND joined.user_id != @current_user_id
+                        AND joined.created_at >= self.join_at
+                        AND joined.created_at <= left_event.created_at
+                        AND (
+                            (
+                                joined.user_id != ''
+                                AND joined.user_id = left_event.user_id
+                            )
+                            OR (
+                                joined.user_id = ''
+                                AND left_event.user_id = ''
+                                AND joined.display_name = left_event.display_name
+                            )
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM gamelog_join_leave newer_join
+                            WHERE newer_join.location = joined.location
+                                AND newer_join.type = 'OnPlayerJoined'
+                                AND newer_join.created_at > joined.created_at
+                                AND newer_join.created_at <= left_event.created_at
+                                AND (
+                                    (
+                                        joined.user_id != ''
+                                        AND newer_join.user_id = joined.user_id
+                                    )
+                                    OR (
+                                        joined.user_id = ''
+                                        AND newer_join.user_id = ''
+                                        AND newer_join.display_name = joined.display_name
+                                    )
+                                )
+                        )
+                    LEFT JOIN present_at_self_join_rows present_at_self_join
+                        ON present_at_self_join.self_session_id = self.id
+                        AND present_at_self_join.joined_id = joined.id
+                    WHERE (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', left_event.created_at, '-' || (left_event.time * 1.0 / 1000) || ' seconds') BETWEEN @utc_start_date AND @utc_end_date
+                        OR left_event.created_at BETWEEN @utc_start_date AND @utc_end_date
+                        )
+                ),
+                open_join_rows AS (
+                    SELECT
+                        -joined.id AS id,
+                        self.leave_at AS created_at,
+                        'OnPlayerLeft' AS type,
+                        joined.display_name,
+                        joined.location,
+                        joined.user_id,
+                        CASE
+                            WHEN present_at_self_join.joined_id IS NOT NULL
+                                THEN CAST(MAX(0, ROUND((julianday(self.leave_at) - julianday(self.join_at)) * 86400000)) AS INTEGER)
+                            ELSE CAST(MAX(0, ROUND((julianday(self.leave_at) - julianday(joined.created_at)) * 86400000)) AS INTEGER)
+                        END AS time,
+                        1 AS still_present_at_self_leave,
+                        CASE
+                            WHEN present_at_self_join.joined_id IS NOT NULL
+                                THEN 1
+                            ELSE 0
+                        END AS present_at_self_join
+                    FROM self_join_bounds self
+                    INNER JOIN gamelog_join_leave joined
+                        ON joined.location = self.location
+                        AND joined.type = 'OnPlayerJoined'
+                        AND joined.created_at >= self.join_at
+                        AND joined.created_at <= self.leave_at
+                        AND joined.user_id != @current_user_id
+                    LEFT JOIN present_at_self_join_rows present_at_self_join
+                        ON present_at_self_join.self_session_id = self.id
+                        AND present_at_self_join.joined_id = joined.id
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM gamelog_join_leave left_event
+                        WHERE left_event.type = 'OnPlayerLeft'
+                            AND left_event.location = joined.location
+                            AND left_event.created_at >= joined.created_at
+                            AND left_event.created_at <= self.leave_at
+                            AND (
+                                (
+                                    joined.user_id != ''
+                                    AND left_event.user_id = joined.user_id
+                                )
+                                OR (
+                                    joined.user_id = ''
+                                    AND left_event.user_id = ''
+                                    AND left_event.display_name = joined.display_name
+                                )
+                            )
+                    )
+                )
+                SELECT * FROM self_rows
+                UNION ALL
+                SELECT * FROM left_rows
+                UNION ALL
+                SELECT * FROM open_join_rows
+                ORDER BY created_at ASC, id ASC;`,
             {
                 '@utc_start_date': startDate,
-                '@utc_end_date': endDate
+                '@utc_end_date': endDate,
+                '@current_user_id': dbVars.userId
             }
         );
 

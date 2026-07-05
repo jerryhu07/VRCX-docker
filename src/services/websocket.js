@@ -3,7 +3,9 @@ import { toast } from 'vue-sonner';
 
 import {
     useFriendStore,
+    useFeedStore,
     useGalleryStore,
+    useGameLogStore,
     useGroupStore,
     useInstanceStore,
     useLocationStore,
@@ -34,7 +36,29 @@ import { watchState } from './watchState';
 import * as workerTimers from 'worker-timers';
 
 let webSocket = null;
+let eventSource = null;
 let lastWebSocketMessage = '';
+let headlessFeedLookupTimer = null;
+let headlessGameLogLookupTimer = null;
+let headlessEventReconnectTimer = null;
+
+const headlessSessionFieldKeys = [
+    '$location_at',
+    '$travelingToTime',
+    '$online_for',
+    '$offline_for',
+    '$active_for'
+];
+
+function getHeadlessSessionFields(content) {
+    const fields = {};
+    for (const key of headlessSessionFieldKeys) {
+        if (content?.[key] !== undefined) {
+            fields[key] = content[key];
+        }
+    }
+    return fields;
+}
 
 /**
  * Reactive WebSocket state for status bar telemetry.
@@ -51,6 +75,10 @@ export const wsState = reactive({
  *
  */
 export function initWebsocket() {
+    if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+        connectHeadlessEvents();
+        return;
+    }
     if (!watchState.isFriendsLoaded || webSocket !== null) {
         return;
     }
@@ -68,6 +96,99 @@ export function initWebsocket() {
         .catch((err) => {
             console.error('WebSocket init error:', err);
         });
+}
+
+function connectHeadlessEvents() {
+    if (eventSource !== null) {
+        return;
+    }
+    const source = new EventSource('/headless/events');
+    source.onmessage = ({ data }) => {
+        try {
+            const payload = JSON.parse(data);
+            if (payload.type === 'state' && payload.state) {
+                wsState.connected = !!payload.state.websocketConnected;
+                wsState.messageCount = payload.state.websocketMessageCount || 0;
+                if (payload.state.loggedIn) {
+                    scheduleHeadlessFeedLookup();
+                }
+                return;
+            }
+            if (payload.type === 'feed-refresh') {
+                scheduleHeadlessFeedLookup();
+                return;
+            }
+            if (payload.type === 'game-log-refresh') {
+                scheduleHeadlessGameLogLookup();
+                if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('vrcx:game-log-refresh'));
+                }
+                return;
+            }
+            if (payload.type === 'pipeline' && payload.event) {
+                const raw = JSON.stringify(payload.event);
+                wsState.messageCount++;
+                wsState.bytesReceived += raw.length;
+                handlePipeline({
+                    json: payload.event
+                });
+            }
+        } catch (err) {
+            console.error('Headless event stream error:', err);
+        }
+    };
+    source.onerror = () => {
+        wsState.connected = false;
+        scheduleHeadlessEventReconnect(source);
+    };
+    eventSource = source;
+}
+
+function scheduleHeadlessEventReconnect(source) {
+    if (headlessEventReconnectTimer !== null) {
+        return;
+    }
+    headlessEventReconnectTimer = workerTimers.setTimeout(() => {
+        headlessEventReconnectTimer = null;
+        if (eventSource !== source) {
+            return;
+        }
+        try {
+            source.close();
+        } catch {
+            // ignored
+        }
+        if (eventSource === source) {
+            eventSource = null;
+        }
+        if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+            connectHeadlessEvents();
+        }
+    }, 5000);
+}
+
+function scheduleHeadlessFeedLookup() {
+    if (headlessFeedLookupTimer !== null) {
+        return;
+    }
+    headlessFeedLookupTimer = workerTimers.setTimeout(() => {
+        headlessFeedLookupTimer = null;
+        useFeedStore().feedTableLookup().catch((err) => {
+            console.error('Headless feed refresh failed:', err);
+        });
+    }, 250);
+}
+
+function scheduleHeadlessGameLogLookup() {
+    if (headlessGameLogLookupTimer !== null) {
+        return;
+    }
+    headlessGameLogLookupTimer = workerTimers.setTimeout(() => {
+        headlessGameLogLookupTimer = null;
+        useGameLogStore().gameLogTableLookup().catch((err) => {
+            console.error('Headless game log refresh failed:', err);
+        });
+    }, 250);
 }
 
 /**
@@ -159,6 +280,23 @@ function connectWebSocket(token) {
  * @returns {void}
  */
 export function closeWebSocket() {
+    if (headlessFeedLookupTimer !== null) {
+        workerTimers.clearTimeout(headlessFeedLookupTimer);
+        headlessFeedLookupTimer = null;
+    }
+    if (headlessGameLogLookupTimer !== null) {
+        workerTimers.clearTimeout(headlessGameLogLookupTimer);
+        headlessGameLogLookupTimer = null;
+    }
+    if (headlessEventReconnectTimer !== null) {
+        workerTimers.clearTimeout(headlessEventReconnectTimer);
+        headlessEventReconnectTimer = null;
+    }
+    if (eventSource !== null) {
+        eventSource.close();
+        eventSource = null;
+        wsState.connected = false;
+    }
     const socket = webSocket;
     if (socket === null) {
         return;
@@ -351,7 +489,8 @@ function handlePipeline(args) {
                 instanceId: 'offline',
                 travelingToLocation: 'offline',
                 travelingToWorld: 'offline',
-                travelingToInstance: 'offline'
+                travelingToInstance: 'offline',
+                ...getHeadlessSessionFields(content)
             };
             applyUser(offlineJson);
             break;
@@ -374,7 +513,8 @@ function handlePipeline(args) {
                     instanceId: $location1.instanceId,
                     travelingToLocation: content.travelingToLocation,
                     travelingToWorld: $travelingToLocation1.worldId,
-                    travelingToInstance: $travelingToLocation1.instanceId
+                    travelingToInstance: $travelingToLocation1.instanceId,
+                    ...getHeadlessSessionFields(content)
                 };
                 applyUser(jankLocationJson);
                 break;

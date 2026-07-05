@@ -60,6 +60,8 @@ export function useInstanceActivityData() {
             joinTime: dayjs(item.created_at).subtract(item.time, 'millisecond'),
             leaveTime: dayjs(item.created_at),
             time: item.time < 0 ? 0 : item.time,
+            stillPresentAtSelfLeave: !!item.still_present_at_self_leave,
+            presentAtSelfJoin: !!item.present_at_self_join,
             isFriend:
                 item.user_id === currentUser.value.id
                     ? null

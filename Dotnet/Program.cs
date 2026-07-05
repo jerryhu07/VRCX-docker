@@ -286,6 +286,16 @@ namespace VRCX
             VRCXVRInstance = new VRCXVRElectron();
             VRCXVRInstance.Init();
         }
+
+        public static void InitHeadless()
+        {
+            ConfigureLogger();
+
+            logger.Info("{0} Headless backend starting...", Version);
+            logger.Info("Args: {0}", JsonSerializer.Serialize(StartupArgs.Args));
+
+            AppApiInstance = new AppApiElectron();
+        }
 #endif
     }
 
@@ -300,6 +310,11 @@ namespace VRCX
         public void Init()
         {
             Program.Init();
+        }
+
+        public void InitHeadless()
+        {
+            Program.InitHeadless();
         }
     }
 #endif

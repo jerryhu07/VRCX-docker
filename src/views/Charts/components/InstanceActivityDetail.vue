@@ -316,6 +316,50 @@
                     ];
                 });
 
+            const presentAtStartMarkers = [];
+            const stillPresentMarkers = [];
+            for (const entries of userGroupedEntries.values()) {
+                for (const element of entries) {
+                    if (element.entry.presentAtSelfJoin) {
+                        presentAtStartMarkers.push({
+                            value: [0, element.entry.display_name]
+                        });
+                    }
+                    if (element.entry.stillPresentAtSelfLeave) {
+                        stillPresentMarkers.push({
+                            value: [element.tail, element.entry.display_name]
+                        });
+                    }
+                }
+            }
+
+            const edgeMarkerSeries = (name, data, rotate) => ({
+                name,
+                type: 'scatter',
+                symbol: 'triangle',
+                symbolRotate: rotate,
+                symbolSize: Math.max(5, Math.min(8, props.barWidth * 0.45)),
+                silent: true,
+                tooltip: {
+                    show: false
+                },
+                itemStyle: {
+                    color: isDarkMode.value ? 'rgba(203, 213, 225, 0.72)' : 'rgba(100, 116, 139, 0.65)'
+                },
+                z: 10,
+                data
+            });
+
+            if (presentAtStartMarkers.length) {
+                series.push(edgeMarkerSeries('PresentAtSelfJoin', presentAtStartMarkers, -90));
+            }
+
+            if (stillPresentMarkers.length) {
+                series.push({
+                    ...edgeMarkerSeries('StillPresentAtSelfLeave', stillPresentMarkers, 90)
+                });
+            }
+
             return series;
         };
 

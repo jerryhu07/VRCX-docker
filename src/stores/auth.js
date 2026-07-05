@@ -33,6 +33,21 @@ import webApiService from '../services/webapi';
 import * as workerTimers from 'worker-timers';
 import { useActivityStore } from './activity';
 
+async function headlessSessionPost(path, body = {}) {
+    const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+    });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(json?.error?.message || response.statusText);
+    }
+    return json;
+}
+
 export const useAuthStore = defineStore('Auth', () => {
     const advancedSettingsStore = useAdvancedSettingsStore();
     const generalSettingsStore = useGeneralSettingsStore();
@@ -187,6 +202,9 @@ export const useAuthStore = defineStore('Auth', () => {
      */
     async function handleLogoutEvent() {
         await runLogoutFlow();
+        if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+            await headlessSessionPost('/headless/session/logout');
+        }
     }
 
     /**
@@ -801,12 +819,12 @@ export const useAuthStore = defineStore('Auth', () => {
                     .verifyTOTP({
                         code: value.trim()
                     })
+                    .then(({ json }) => {
+                        handleCurrentUserUpdate(json);
+                    })
                     .catch((err) => {
                         console.error(err);
                         clearCookiesTryLogin();
-                    })
-                    .then(() => {
-                        getCurrentUser();
                     });
             })
             .catch(() => {
@@ -843,12 +861,12 @@ export const useAuthStore = defineStore('Auth', () => {
                     .verifyOTP({
                         code: `${value.slice(0, 4)}-${value.slice(4)}`
                     })
+                    .then(({ json }) => {
+                        handleCurrentUserUpdate(json);
+                    })
                     .catch((err) => {
                         console.error(err);
                         clearCookiesTryLogin();
-                    })
-                    .then(() => {
-                        getCurrentUser();
                     });
             })
             .catch(() => {
@@ -886,12 +904,12 @@ export const useAuthStore = defineStore('Auth', () => {
                     .verifyEmailOTP({
                         code: value.trim()
                     })
+                    .then(({ json }) => {
+                        handleCurrentUserUpdate(json);
+                    })
                     .catch((err) => {
                         console.error(err);
                         promptEmailOTP();
-                    })
-                    .then(() => {
-                        getCurrentUser();
                     });
             })
             .catch(() => {
@@ -912,6 +930,22 @@ export const useAuthStore = defineStore('Auth', () => {
             saveCredentials,
             cipher
         } = params;
+        if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+            return headlessSessionPost('/headless/session/login', {
+                username,
+                password,
+                endpoint,
+                websocket,
+                saveCredentials
+            }).then((json) => {
+                const args = {
+                    json,
+                    origin: true
+                };
+                handleCurrentUserUpdate(json);
+                return args;
+            });
+        }
         const auth = btoa(
             `${encodeURIComponent(username)}:${encodeURIComponent(password)}`
         );

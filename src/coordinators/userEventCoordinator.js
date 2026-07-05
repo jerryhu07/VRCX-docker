@@ -12,6 +12,10 @@ import { useSharedFeedStore } from '../stores/sharedFeed';
 import { useUserStore } from '../stores/user';
 import { useWorldStore } from '../stores/world';
 
+function shouldClientWriteFeed() {
+    return !(typeof window !== 'undefined' && window.__VRCX_HEADLESS__);
+}
+
 /**
  * Handles user diff events and applies cross-store side effects.
  * @param {object} ref Updated user reference.
@@ -142,10 +146,12 @@ export async function runHandleUserUpdateFlow(
                 previousLocation,
                 time
             };
-            notificationStore.queueFeedNoty(feed);
-            sharedFeedStore.addEntry(feed);
-            feedStore.addFeedEntry(feed);
-            database.addGPSToDatabase(feed);
+            if (shouldClientWriteFeed()) {
+                notificationStore.queueFeedNoty(feed);
+                sharedFeedStore.addEntry(feed);
+                feedStore.addFeedEntry(feed);
+                database.addGPSToDatabase(feed);
+            }
             // clear previousLocation after GPS
             ref.$previousLocation = '';
             ref.$travelingToTime = now();
@@ -252,10 +258,12 @@ export async function runHandleUserUpdateFlow(
                 currentAvatarTags,
                 previousCurrentAvatarTags
             };
-            notificationStore.queueFeedNoty(feed);
-            sharedFeedStore.addEntry(feed);
-            feedStore.addFeedEntry(feed);
-            database.addAvatarToDatabase(feed);
+            if (shouldClientWriteFeed()) {
+                notificationStore.queueFeedNoty(feed);
+                sharedFeedStore.addEntry(feed);
+                feedStore.addFeedEntry(feed);
+                database.addAvatarToDatabase(feed);
+            }
         }
     }
     // if status is offline, ignore status and statusDescription
@@ -301,10 +309,12 @@ export async function runHandleUserUpdateFlow(
             previousStatus,
             previousStatusDescription
         };
-        notificationStore.queueFeedNoty(feed);
-        sharedFeedStore.addEntry(feed);
-        feedStore.addFeedEntry(feed);
-        database.addStatusToDatabase(feed);
+        if (shouldClientWriteFeed()) {
+            notificationStore.queueFeedNoty(feed);
+            sharedFeedStore.addEntry(feed);
+            feedStore.addFeedEntry(feed);
+            database.addStatusToDatabase(feed);
+        }
     }
     if (props.bio && props.bio[0] && props.bio[1]) {
         let bio = '';
@@ -323,10 +333,12 @@ export async function runHandleUserUpdateFlow(
             bio,
             previousBio
         };
-        notificationStore.queueFeedNoty(feed);
-        sharedFeedStore.addEntry(feed);
-        feedStore.addFeedEntry(feed);
-        database.addBioToDatabase(feed);
+        if (shouldClientWriteFeed()) {
+            notificationStore.queueFeedNoty(feed);
+            sharedFeedStore.addEntry(feed);
+            feedStore.addFeedEntry(feed);
+            database.addBioToDatabase(feed);
+        }
     }
     if (
         props.note &&

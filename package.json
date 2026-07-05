@@ -35,11 +35,16 @@
         "build-electron-arm64": "node ./src-electron/download-dotnet-runtime.js --arch=arm64 && node ./src-electron/patch-package-version.js && electron-builder --arm64 --publish never",
         "postbuild-electron": "node ./src-electron/patch-node-api-dotnet.js --arch=x64 && node ./src-electron/rename-builds.js --arch=x64",
         "postbuild-electron-arm64": "node ./src-electron/patch-node-api-dotnet.js --arch=arm64 && node ./src-electron/rename-builds.js --arch=arm64",
+        "headless": "node ./headless/server.js",
+        "log-streamer": "node ./tools/log-streamer/log-streamer.js",
+        "build:log-streamer:win-x64": "node ./build-scripts/build-log-streamer-win-x64.js",
+        "headless:docker:build": "docker build -t vrcx-headless .",
         "start-electron": "electron . --hot-reload"
     },
     "dependencies": {
         "hazardous": "^0.3.0",
-        "node-api-dotnet": "^0.9.21"
+        "node-api-dotnet": "^0.9.21",
+        "ws": "^8.21.0"
     },
     "devDependencies": {
         "@dnd-kit/vue": "^0.4.0",
@@ -90,6 +95,7 @@
         "oxfmt": "^0.52.0",
         "oxlint": "^1.67.0",
         "pinia": "^3.0.4",
+        "postject": "^1.0.0-alpha.6",
         "reka-ui": "^2.9.8",
         "remixicon": "^4.9.1",
         "sigma": "^3.0.3",

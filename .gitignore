@@ -2,6 +2,7 @@ node_modules/
 build/
 obj/
 obj1/
+.DS_Store
 .idea/
 *.log
 *.DotSettings.user
@@ -14,3 +15,5 @@ AGENTS.md
 AI_GUIDE.md
 CLAUDE.md
 coverage/
+data/*
+!data/.gitkeep

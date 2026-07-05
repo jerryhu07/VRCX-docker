@@ -16,6 +16,9 @@ namespace VRCX
 
         public override void SetVR(bool active, bool hmdOverlay, bool wristOverlay, bool menuButton, int overlayHand)
         {
+            if (Program.VRCXVRInstance == null)
+                return;
+
             Program.VRCXVRInstance.SetActive(active, hmdOverlay, wristOverlay, menuButton, overlayHand);
         }
 
@@ -43,6 +46,9 @@ namespace VRCX
 
         public override void ExecuteVrOverlayFunction(string function, string json)
         {
+            if (Program.VRCXVRInstance == null)
+                return;
+
             Program.VRCXVRInstance.ExecuteVrOverlayFunction(function, json);
         }
 

@@ -10,6 +10,15 @@ import { useUserStore } from '../stores/user';
 import { userRequest } from '../api';
 import { watchState } from '../services/watchState';
 
+function timerValue(value, fallback) {
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function shouldClientWriteFeed() {
+    return !(typeof window !== 'undefined' && window.__VRCX_HEADLESS__);
+}
+
 /**
  * @param {object} ctx
  * @param {string} newState
@@ -53,17 +62,20 @@ export async function runUpdateFriendDelayedCheckFlow(
     const isVIP = localFavoriteFriends.has(id);
     const ref = ctx.ref;
     if (ctx.state !== newState && typeof ctx.ref !== 'undefined') {
+        const ts = now();
         if (
             (newState === 'offline' || newState === 'active') &&
             ctx.state === 'online'
         ) {
             ctx.ref.$online_for = '';
-            ctx.ref.$offline_for = now();
+            ctx.ref.$offline_for =
+                newState === 'offline'
+                    ? timerValue(ctx.ref.$offline_for, ts)
+                    : '';
             ctx.ref.$active_for = '';
             if (newState === 'active') {
-                ctx.ref.$active_for = now();
+                ctx.ref.$active_for = timerValue(ctx.ref.$active_for, ts);
             }
-            const ts = now();
             const time = ts - $location_at;
             worldName = await getWorldName(location);
             groupName = await getGroupName(location);
@@ -77,18 +89,20 @@ export async function runUpdateFriendDelayedCheckFlow(
                 groupName,
                 time
             };
-            notificationStore.queueFeedNoty(feed);
-            sharedFeedStore.addEntry(feed);
-            feedStore.addFeedEntry(feed);
-            database.addOnlineOfflineToDatabase(feed);
+            if (shouldClientWriteFeed()) {
+                notificationStore.queueFeedNoty(feed);
+                sharedFeedStore.addEntry(feed);
+                feedStore.addFeedEntry(feed);
+                database.addOnlineOfflineToDatabase(feed);
+            }
         } else if (
             newState === 'online' &&
             (ctx.state === 'offline' || ctx.state === 'active')
         ) {
             ctx.ref.$previousLocation = '';
-            ctx.ref.$travelingToTime = now();
-            ctx.ref.$location_at = now();
-            ctx.ref.$online_for = now();
+            ctx.ref.$travelingToTime = timerValue(ctx.ref.$travelingToTime, ts);
+            ctx.ref.$location_at = timerValue(ctx.ref.$location_at, ts);
+            ctx.ref.$online_for = timerValue(ctx.ref.$online_for, ts);
             ctx.ref.$offline_for = '';
             ctx.ref.$active_for = '';
             worldName = await getWorldName(location);
@@ -103,13 +117,15 @@ export async function runUpdateFriendDelayedCheckFlow(
                 groupName,
                 time: ''
             };
-            notificationStore.queueFeedNoty(feed);
-            sharedFeedStore.addEntry(feed);
-            feedStore.addFeedEntry(feed);
-            database.addOnlineOfflineToDatabase(feed);
+            if (shouldClientWriteFeed()) {
+                notificationStore.queueFeedNoty(feed);
+                sharedFeedStore.addEntry(feed);
+                feedStore.addFeedEntry(feed);
+                database.addOnlineOfflineToDatabase(feed);
+            }
         }
         if (newState === 'active') {
-            ctx.ref.$active_for = now();
+            ctx.ref.$active_for = timerValue(ctx.ref.$active_for, ts);
         }
     }
     if (ctx.state !== newState) {

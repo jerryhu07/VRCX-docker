@@ -255,7 +255,9 @@ export function applyUser(json) {
     }
     if (hasPropChanged) {
         if (changedProps.location && changedProps.location[0] !== 'traveling') {
-            if (playerListRef) {
+            if (Number.isFinite(Number(json.$location_at))) {
+                changedProps.location.push(Date.now() - Number(json.$location_at));
+            } else if (playerListRef) {
                 ref.$location_at = playerListRef.joinTime;
             } else {
                 const ts = Date.now();

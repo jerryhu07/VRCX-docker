@@ -1,13 +1,15 @@
 // @ts-nocheck
 import InteropApi from '../ipc-electron/interopApi.js';
 import configRepository from '../services/config.js';
+import { installHeadlessBridge } from '../services/headlessBridge.js';
 import vrcxJsonStorage from '../services/jsonStorage.js';
 
 export async function initInteropApi(isVrOverlay = false) {
+    const headless = installHeadlessBridge();
     if (isVrOverlay) {
         if (WINDOWS) {
             await CefSharp.BindObjectAsync('AppApiVr');
-        } else {
+        } else if (!headless) {
             // @ts-ignore
             window.AppApiVr = InteropApi.AppApiVrElectron;
         }
@@ -23,7 +25,7 @@ export async function initInteropApi(isVrOverlay = false) {
                 'Discord',
                 'AssetBundleManager'
             );
-        } else {
+        } else if (!headless) {
             window.AppApi = InteropApi.AppApiElectron;
             window.WebApi = InteropApi.WebApi;
             window.VRCXStorage = InteropApi.VRCXStorage;

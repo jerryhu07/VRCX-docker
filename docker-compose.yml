@@ -1,0 +1,16 @@
+services:
+  vrcx-headless:
+    build:
+      context: .
+    image: vrcx-headless:local
+    container_name: vrcx-headless
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      VRCX_APP_DATA_DIR: /data
+      VRCX_LOG_STREAM_TOKEN: "${VRCX_LOG_STREAM_TOKEN:-}"
+      VRCX_LOG_STREAM_ALLOW_TOKEN_READ: "${VRCX_LOG_STREAM_ALLOW_TOKEN_READ:-1}"
+    ports:
+      - "${VRCX_HOST_PORT:-18080}:8080"
+    volumes:
+      - "${VRCX_DATA_DIR:-./data}:/data"
