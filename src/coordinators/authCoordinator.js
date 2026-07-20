@@ -38,10 +38,16 @@ export async function runLogoutFlow() {
     watchState.isFriendsLoaded = false;
     watchState.isFavoritesLoaded = false;
     notificationStore.setNotificationInitStatus(false);
-    await authStore.updateStoredUser(userStore.currentUser);
-    webApiService.clearCookies();
+    const isHeadless =
+        typeof window !== 'undefined' && window.__VRCX_HEADLESS__;
+    if (!isHeadless) {
+        await authStore.updateStoredUser(userStore.currentUser);
+        await webApiService.clearCookies();
+    }
     authStore.loginForm.lastUserLoggedIn = '';
-    await configRepository.remove('lastUserLoggedIn');
+    if (!isHeadless) {
+        await configRepository.remove('lastUserLoggedIn');
+    }
     authStore.setAttemptingAutoLogin(false);
     authStore.autoLoginAttempts.clear();
     closeWebSocket();

@@ -286,6 +286,7 @@ describe('useAuthStore login failure toast policy', () => {
             displayName: 'Tester'
         };
         mocks.vrcxStore.waitForDatabaseInit.mockResolvedValue(true);
+        window.__VRCX_HEADLESS__ = false;
 
         globalThis.AppApi = {
             CheckGameRunning: vi.fn(),
@@ -296,6 +297,8 @@ describe('useAuthStore login failure toast policy', () => {
     });
 
     afterEach(() => {
+        vi.unstubAllGlobals();
+        delete window.__VRCX_HEADLESS__;
         vi.useRealTimers();
     });
 
@@ -464,5 +467,69 @@ describe('useAuthStore login failure toast policy', () => {
             'login-network-issue-toast'
         );
         expect(mocks.toast.warning).toHaveBeenCalledTimes(1);
+    });
+
+    test('delegates headless login to the backend without mutating backend cookies', async () => {
+        window.__VRCX_HEADLESS__ = true;
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: vi.fn().mockResolvedValue({
+                id: 'usr_me',
+                displayName: 'Tester'
+            })
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const store = await createAuthStore();
+        store.loginForm.username = 'tester@example.com';
+        store.loginForm.password = 'password';
+
+        await store.login();
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/headless/session/login',
+            expect.objectContaining({ method: 'POST' })
+        );
+        expect(mocks.webApiService.clearCookies).not.toHaveBeenCalled();
+        expect(mocks.authRequest.getConfig).not.toHaveBeenCalled();
+        expect(mocks.runLoginSuccessFlow).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'usr_me' })
+        );
+    });
+
+    test('saved headless accounts recover the backend session instead of starting a fresh login', async () => {
+        window.__VRCX_HEADLESS__ = true;
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: vi.fn().mockResolvedValue({
+                id: 'usr_me',
+                displayName: 'Tester'
+            })
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const store = await createAuthStore();
+
+        await store.relogin({
+            user: { id: 'usr_me', displayName: 'Tester' },
+            loginParams: {
+                username: 'tester@example.com',
+                password: 'password',
+                endpoint: '',
+                websocket: ''
+            }
+        });
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/headless/session/recover',
+            expect.objectContaining({ method: 'POST' })
+        );
+        expect(fetchMock).not.toHaveBeenCalledWith(
+            '/headless/session/login',
+            expect.anything()
+        );
+        expect(mocks.runLoginSuccessFlow).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'usr_me' })
+        );
     });
 });

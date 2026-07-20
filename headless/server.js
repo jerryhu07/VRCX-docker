@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global require, module, __dirname, Buffer */
 
 const fs = require('fs');
 const http = require('http');
@@ -16,6 +17,14 @@ const port = Number(process.env.PORT || 8080);
 const friendRefreshIntervalMs = Number(
     process.env.VRCX_FRIEND_REFRESH_INTERVAL_MS || 0
 );
+const configuredAuthValidationIntervalMs = Number(
+    process.env.VRCX_AUTH_VALIDATION_INTERVAL_MS || 420000
+);
+const authValidationIntervalMs =
+    Number.isFinite(configuredAuthValidationIntervalMs) &&
+    configuredAuthValidationIntervalMs > 0
+        ? Math.max(60000, configuredAuthValidationIntervalMs)
+        : 420000;
 
 const defaultEndpoint = 'https://api.vrchat.cloud/api/1';
 const defaultPipeline = 'wss://pipeline.vrchat.cloud';
@@ -313,6 +322,22 @@ class CookieJar {
         this.cookies = [];
     }
 
+    cloneCookies() {
+        return this.cookies.map((cookie) => ({ ...cookie }));
+    }
+
+    mergeCookies(cookies) {
+        for (const cookie of cookies || []) {
+            this.cookies = this.cookies.filter(
+                (item) =>
+                    item.name !== cookie.name ||
+                    item.domain !== cookie.domain ||
+                    item.path !== cookie.path
+            );
+            this.cookies.push({ ...cookie });
+        }
+    }
+
     importBase64(value) {
         if (!value) {
             this.cookies = [];
@@ -384,6 +409,7 @@ class CookieJar {
         for (const header of setCookieHeaders) {
             this.storeCookie(urlValue, header);
         }
+        return setCookieHeaders.length > 0;
     }
 
     storeCookie(urlValue, header) {
@@ -422,8 +448,8 @@ class CookieJar {
             } else if (key === 'samesite') {
                 cookie.sameSite = value;
             } else if (key === 'expires' && value) {
-                cookie.expires = value;
                 if (Date.parse(value) <= Date.now()) deleteCookie = true;
+                cookie.expires = value;
             } else if (key === 'max-age') {
                 const maxAge = Number(value);
                 if (Number.isFinite(maxAge)) {
@@ -436,6 +462,14 @@ class CookieJar {
                     }
                 }
             }
+        }
+
+        // VRCX's desktop CookieContainer deliberately keeps accepted session
+        // cookies alive and lets the API decide whether they are still valid.
+        // Match that behavior so a browser-independent backend does not discard
+        // an otherwise reusable VRChat session merely because local time passed.
+        if (!deleteCookie && cookie.expires) {
+            cookie.expires = 'Fri, 31 Dec 9999 23:59:59 GMT';
         }
 
         this.cookies = this.cookies.filter(
@@ -455,8 +489,11 @@ class HeadlessSession {
         this.websocketDomain = process.env.VRCX_PIPELINE_ENDPOINT || defaultPipeline;
         this.currentUser = null;
         this.loggedIn = false;
+        this.authState = 'logged_out';
+        this.authStateReason = '';
         this.pendingTwoFactor = [];
         this.pendingLoginParams = null;
+        this.authOperation = Promise.resolve();
         this.websocketConnected = false;
         this.websocketMessageCount = 0;
         this.lastPipelineMessage = '';
@@ -466,11 +503,21 @@ class HeadlessSession {
         this.pipelineRecoveryTimer = null;
         this.authRecoveryTimer = null;
         this.authRecoveryInFlight = false;
+        this.lastAuthValidationAt = 0;
+        this.lastAuthRecoveryAt = 0;
+        this.authRecoveryCount = 0;
+        this.autoRecoveryDisabled = false;
         this.friendRefreshTimer = null;
         this.friendRefreshInFlight = false;
         this.clients = new Set();
         this.friends = new Map();
         this.logStreamClients = new Map();
+        this.pipelineSelfInstance = {
+            location: '',
+            locationAt: 0,
+            locationCreatedAt: '',
+            worldName: ''
+        };
         this.worldNameCache = new Map();
         this.groupNameCache = new Map();
         this.avatarNameCache = new Map();
@@ -482,6 +529,9 @@ class HeadlessSession {
     async init({ restoreSession = true } = {}) {
         await this.initGlobalTables();
         await this.cookieJar.load();
+        this.autoRecoveryDisabled =
+            (await this.configGet('headlessAutoRecoveryDisabled', 'false')) ===
+            'true';
         await this.restoreEndpointFromStorage();
         if (restoreSession) {
             await this.tryRestoreSession();
@@ -492,6 +542,19 @@ class HeadlessSession {
         return {
             startedAt: this.startedAt,
             loggedIn: this.loggedIn,
+            authState: this.authState,
+            authStateReason: this.authStateReason,
+            authMaintenance: {
+                validationIntervalMs: authValidationIntervalMs,
+                autoRecoveryEnabled: !this.autoRecoveryDisabled,
+                lastValidatedAt: this.lastAuthValidationAt
+                    ? new Date(this.lastAuthValidationAt).toJSON()
+                    : '',
+                lastRecoveredAt: this.lastAuthRecoveryAt
+                    ? new Date(this.lastAuthRecoveryAt).toJSON()
+                    : '',
+                recoveryCount: this.authRecoveryCount
+            },
             pendingTwoFactor: this.pendingTwoFactor,
             websocketConnected: this.websocketConnected,
             websocketMessageCount: this.websocketMessageCount,
@@ -551,8 +614,30 @@ class HeadlessSession {
         return await this.call('VRCXStorage', 'Set', [key, String(value ?? '')]);
     }
 
-    async clearCookies() {
+    isTwoFactorCookie(cookie) {
+        return String(cookie?.name || '').toLowerCase() === 'twofactorauth';
+    }
+
+    async clearCookies({ preserveTwoFactorCookies = false } = {}) {
+        const preservedCookies = preserveTwoFactorCookies
+            ? this.cookieJar
+                  .cloneCookies()
+                  .filter((cookie) => this.isTwoFactorCookie(cookie))
+            : [];
         this.cookieJar.clear();
+        this.cookieJar.mergeCookies(preservedCookies);
+        await this.cookieJar.save();
+    }
+
+    async mergeSavedTwoFactorCookies(cookies) {
+        if (!cookies) return;
+        const savedJar = new CookieJar(this);
+        savedJar.importBase64(cookies);
+        this.cookieJar.mergeCookies(
+            savedJar
+                .cloneCookies()
+                .filter((cookie) => this.isTwoFactorCookie(cookie))
+        );
         await this.cookieJar.save();
     }
 
@@ -561,7 +646,9 @@ class HeadlessSession {
     }
 
     async setCookies(cookies) {
-        this.cookieJar.importBase64(cookies);
+        const savedJar = new CookieJar(this);
+        savedJar.importBase64(cookies);
+        this.cookieJar.mergeCookies(savedJar.cloneCookies());
         await this.cookieJar.save();
     }
 
@@ -592,6 +679,91 @@ class HeadlessSession {
         await this.sqliteNonQuery('DELETE FROM configs WHERE key = @key', {
             '@key': `config:${String(key).toLowerCase()}`
         });
+    }
+
+    setAuthState(authState, reason = '') {
+        this.authState = authState;
+        this.authStateReason = reason;
+    }
+
+    async runAuthOperation(operation) {
+        const previous = this.authOperation;
+        let release;
+        this.authOperation = new Promise((resolve) => {
+            release = resolve;
+        });
+        await previous;
+        try {
+            return await operation();
+        } finally {
+            release();
+        }
+    }
+
+    stopAuthenticatedServices() {
+        this.loggedIn = false;
+        this.stopFriendRefreshLoop();
+        this.closePipeline();
+    }
+
+    async persistPendingLogin() {
+        if (!this.pendingLoginParams) {
+            await this.configRemove('headlessPendingLogin');
+            return;
+        }
+        await this.configSet(
+            'headlessPendingLogin',
+            JSON.stringify({
+                loginParams: this.pendingLoginParams,
+                pendingTwoFactor: this.pendingTwoFactor
+            })
+        );
+    }
+
+    async loadPendingLogin() {
+        const raw = await this.configGet('headlessPendingLogin', '');
+        if (!raw) return false;
+        try {
+            const pending = JSON.parse(raw);
+            if (!pending?.loginParams) return false;
+            this.pendingLoginParams = this.buildLoginParams(pending.loginParams);
+            this.pendingTwoFactor = Array.isArray(pending.pendingTwoFactor)
+                ? pending.pendingTwoFactor
+                : [];
+            return true;
+        } catch {
+            await this.configRemove('headlessPendingLogin');
+            return false;
+        }
+    }
+
+    async enterTwoFactor(user, loginParams = null) {
+        this.stopAuthenticatedServices();
+        this.currentUser = null;
+        this.pendingTwoFactor = Array.isArray(user?.requiresTwoFactorAuth)
+            ? user.requiresTwoFactorAuth
+            : [];
+        if (loginParams) {
+            this.pendingLoginParams = this.buildLoginParams(loginParams);
+        }
+        this.setAuthState('awaiting_2fa');
+        await this.persistPendingLogin();
+        this.broadcast({ type: 'state', state: this.state() });
+    }
+
+    async markAuthenticationLost(reason) {
+        if (this.authState === 'awaiting_2fa' || this.authState === 'authenticating') {
+            return;
+        }
+        this.stopAuthenticatedServices();
+        this.currentUser = null;
+        this.setAuthState('recovering', reason || 'VRChat session expired');
+        this.broadcast({ type: 'state', state: this.state() });
+        setTimeout(() => {
+            this.ensureAuthenticated().catch((err) => {
+                console.warn('Immediate auth recovery failed:', err.message || err);
+            });
+        }, 0).unref?.();
     }
 
     async webApiExecute(options) {
@@ -656,9 +828,15 @@ class HeadlessSession {
             init.body = options.body;
         }
 
+        const wasLoggedIn = this.loggedIn;
+        const trustedCookies = this.cookieJar
+            .cloneCookies()
+            .filter((cookie) => this.isTwoFactorCookie(cookie));
         const response = await fetch(options.url, init);
-        this.cookieJar.storeFromResponse(options.url, response.headers);
-        await this.cookieJar.save();
+        const cookiesChanged = this.cookieJar.storeFromResponse(
+            options.url,
+            response.headers
+        );
 
         const contentType = response.headers.get('content-type') || '';
         let data =
@@ -669,6 +847,31 @@ class HeadlessSession {
                   ).toString('base64')}`
                 : await response.text();
 
+        const authenticationError =
+            response.status === 401 && this.isAuthenticationErrorResponse(data);
+        const authenticationFailed = wasLoggedIn && authenticationError;
+
+        // A rejected auth response may delete every cookie. Keep the independent
+        // 2FA trust cookie so password fallback can mint a new auth session without
+        // asking the operator for another code.
+        if (response.status === 401 && trustedCookies.length) {
+            this.cookieJar.mergeCookies(trustedCookies);
+        }
+        await this.cookieJar.save();
+
+        if (
+            cookiesChanged &&
+            this.loggedIn &&
+            this.currentUser?.id &&
+            !authenticationFailed
+        ) {
+            await this.updateSavedCookieSnapshot();
+        }
+
+        if (authenticationFailed) {
+            await this.markAuthenticationLost('VRChat rejected the active session');
+        }
+
         if (response.status === 200 && !data.startsWith('data:')) {
             data = this.augmentApiResponse(options.url, data);
         }
@@ -677,6 +880,14 @@ class HeadlessSession {
             status: response.status,
             data
         };
+    }
+
+    isAuthenticationErrorResponse(data) {
+        const parsed = parseMaybeJson(data);
+        const message = String(
+            parsed?.error?.message || parsed?.message || data || ''
+        ).toLowerCase();
+        return message.includes('missing credentials') || message.includes('unauthorized');
     }
 
     async vrchatRequest(endpoint, options = {}) {
@@ -790,9 +1001,8 @@ class HeadlessSession {
     }
 
     async restoreEndpointFromStorage() {
-        const lastUserLoggedIn = await this.configGet('lastUserLoggedIn', '');
-        if (!lastUserLoggedIn) return;
         const savedCredentials = await this.getSavedCredentials();
+        const lastUserLoggedIn = await this.configGet('lastUserLoggedIn', '');
         const saved = savedCredentials[lastUserLoggedIn];
         if (saved?.loginParams?.endpoint) {
             this.endpointDomain = saved.loginParams.endpoint;
@@ -809,7 +1019,40 @@ class HeadlessSession {
         }
     }
 
-    async saveCredential(user, loginParams = null, force = false) {
+    async getRecoveryCredential() {
+        if (this.autoRecoveryDisabled) return null;
+
+        const savedCredentials = await this.getSavedCredentials();
+        const lastUserLoggedIn = await this.configGet('lastUserLoggedIn', '');
+        if (lastUserLoggedIn && savedCredentials[lastUserLoggedIn]) {
+            return {
+                userId: lastUserLoggedIn,
+                saved: savedCredentials[lastUserLoggedIn]
+            };
+        }
+
+        const candidates = Object.entries(savedCredentials).filter(
+            ([, saved]) => saved?.user?.id && saved?.loginParams
+        );
+        let candidate = candidates.length === 1 ? candidates[0] : null;
+        if (!candidate && candidates.length > 1) {
+            const dated = candidates
+                .filter(([, saved]) => Number.isFinite(Date.parse(saved.updatedAt)))
+                .sort(
+                    ([, a], [, b]) =>
+                        Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+                );
+            if (dated.length) candidate = dated[0];
+        }
+        if (!candidate) return null;
+
+        const [userId, saved] = candidate;
+        await this.configSet('lastUserLoggedIn', userId);
+        console.warn(`Rebuilt missing last-user recovery index for ${userId}`);
+        return { userId, saved };
+    }
+
+    async saveCredential(user, loginParams = null) {
         if (!user?.id) return;
         const savedCredentials = await this.getSavedCredentials();
         const existing = savedCredentials[user.id];
@@ -824,121 +1067,203 @@ class HeadlessSession {
                 websocket: existing?.loginParams?.websocket || '',
                 ...(loginParams || {})
             },
-            cookies
+            cookies,
+            updatedAt: new Date().toJSON()
         };
         await this.configSet('savedCredentials', JSON.stringify(savedCredentials));
         await this.configSet('lastUserLoggedIn', user.id);
+        this.autoRecoveryDisabled = false;
+        await this.configRemove('headlessAutoRecoveryDisabled');
     }
 
-    buildLoginParams({ username, password, endpoint, websocket, saveCredentials }) {
-        const loginParams = {
+    async updateSavedCookieSnapshot() {
+        if (!this.currentUser?.id) return;
+        const savedCredentials = await this.getSavedCredentials();
+        const saved = savedCredentials[this.currentUser.id];
+        if (!saved) return;
+        saved.user = this.currentUser;
+        saved.cookies = await this.getCookies();
+        saved.updatedAt = new Date().toJSON();
+        await this.configSet('savedCredentials', JSON.stringify(savedCredentials));
+    }
+
+    buildLoginParams({ username, password, endpoint, websocket }) {
+        return {
+            username: username || '',
+            password: password || '',
             endpoint: endpoint || '',
             websocket: websocket || ''
         };
-        if (saveCredentials) {
-            loginParams.username = username || '';
-            loginParams.password = password || '';
+    }
+
+    async requestCurrentUser() {
+        await this.vrchatRequest('config');
+        return await this.vrchatRequest('auth/user');
+    }
+
+    async restoreWithCookies(cookies, loginParams = null) {
+        if (cookies) await this.setCookies(cookies);
+        const user = await this.requestCurrentUser();
+        if (user?.requiresTwoFactorAuth) {
+            await this.enterTwoFactor(user, loginParams);
+            console.log(
+                `Restored login requires 2FA: ${this.pendingTwoFactor.join(', ')}`
+            );
+            return false;
         }
-        return loginParams;
+        await this.completeLogin(user, loginParams);
+        console.log(`Restored VRCX session for ${user.displayName || user.id}`);
+        return true;
     }
 
     async tryRestoreSession() {
+        const recoveryCredential = await this.getRecoveryCredential();
+        const saved = recoveryCredential?.saved;
+        await this.loadPendingLogin();
+
+        if (this.autoRecoveryDisabled) return false;
+
         try {
-            const lastUserLoggedIn = await this.configGet('lastUserLoggedIn', '');
-            const savedCredentials = await this.getSavedCredentials();
-            const saved = savedCredentials[lastUserLoggedIn];
-            if (saved?.cookies) await this.setCookies(saved.cookies);
-            await this.vrchatRequest('config');
-            const user = await this.vrchatRequest('auth/user');
-            if (user?.requiresTwoFactorAuth) {
-                this.pendingTwoFactor = user.requiresTwoFactorAuth;
-                this.broadcast({ type: 'state', state: this.state() });
-                return false;
+            if (this.cookieJar.cookies.length) {
+                return await this.restoreWithCookies(
+                    null,
+                    this.pendingLoginParams || saved?.loginParams || null
+                );
             }
-            await this.completeLogin(user);
-            console.log(`Restored VRCX session for ${user.displayName || user.id}`);
-            return true;
         } catch (err) {
-            console.warn('No reusable VRCX session found:', err.message || err);
-            return await this.trySavedPasswordLogin();
+            console.warn('Active VRChat session could not be restored:', err.message || err);
         }
+
+        try {
+            if (saved?.cookies) {
+                return await this.restoreWithCookies(
+                    saved.cookies,
+                    this.pendingLoginParams || saved.loginParams || null
+                );
+            }
+        } catch (err) {
+            console.warn('Saved VRChat session could not be restored:', err.message || err);
+        }
+
+        return await this.trySavedPasswordLogin(saved);
     }
 
-    async trySavedPasswordLogin() {
+    async trySavedPasswordLogin(saved = null) {
         try {
-            const lastUserLoggedIn = await this.configGet('lastUserLoggedIn', '');
-            if (!lastUserLoggedIn) return false;
+            if (!saved) {
+                const recoveryCredential = await this.getRecoveryCredential();
+                saved = recoveryCredential?.saved;
+            }
             const primaryPasswordEnabled =
                 (await this.configGet('enablePrimaryPassword', 'false')) === 'true';
             if (primaryPasswordEnabled) return false;
-            const savedCredentials = await this.getSavedCredentials();
-            const saved = savedCredentials[lastUserLoggedIn];
             const loginParams = saved?.loginParams;
             if (!loginParams?.username || !loginParams?.password) return false;
-            await this.login({
-                username: loginParams.username,
-                password: loginParams.password,
-                endpoint: loginParams.endpoint || '',
-                websocket: loginParams.websocket || '',
-                saveCredentials: false
-            });
-            return true;
+            await this.mergeSavedTwoFactorCookies(saved.cookies);
+            await this.loginInternal(
+                {
+                    username: loginParams.username,
+                    password: loginParams.password,
+                    endpoint: loginParams.endpoint || '',
+                    websocket: loginParams.websocket || ''
+                },
+                { preserveTwoFactorCookies: true }
+            );
+            return this.loggedIn;
         } catch (err) {
             console.warn('Saved password login failed:', err.message || err);
+            if (this.authState !== 'awaiting_2fa') {
+                if (Number.isInteger(err?.status)) {
+                    this.setAuthState(
+                        'logged_out',
+                        err.message || 'Saved login failed'
+                    );
+                } else {
+                    this.setAuthState(
+                        'recovering',
+                        'VRChat network unavailable; recovery will retry'
+                    );
+                }
+                this.broadcast({ type: 'state', state: this.state() });
+            }
             return false;
         }
     }
 
-    async login({ username, password, endpoint, websocket, saveCredentials }) {
+    async login(params) {
+        return await this.runAuthOperation(() => this.loginInternal(params));
+    }
+
+    async loginInternal(
+        { username, password, endpoint, websocket },
+        { preserveTwoFactorCookies = false } = {}
+    ) {
+        if (!username || !password) {
+            const err = new Error('Username and password are required.');
+            err.status = 400;
+            throw err;
+        }
+
+        this.stopAuthenticatedServices();
+        this.currentUser = null;
         this.endpointDomain = endpoint || defaultEndpoint;
         this.websocketDomain = websocket || defaultPipeline;
         this.pendingTwoFactor = [];
         this.pendingLoginParams = null;
-        await this.clearCookies();
-        await this.vrchatRequest('config');
-        const auth = Buffer.from(
-            `${encodeURIComponent(username)}:${encodeURIComponent(password)}`
-        ).toString('base64');
-        const user = await this.vrchatRequest('auth/user', {
-            method: 'GET',
-            headers: {
-                Authorization: `Basic ${auth}`
-            }
+        this.setAuthState('authenticating');
+        await this.persistPendingLogin();
+        this.broadcast({ type: 'state', state: this.state() });
+        await this.clearCookies({ preserveTwoFactorCookies });
+        const loginParams = this.buildLoginParams({
+            username,
+            password,
+            endpoint,
+            websocket
         });
 
-        if (user?.requiresTwoFactorAuth) {
-            this.pendingTwoFactor = user.requiresTwoFactorAuth;
-            this.pendingLoginParams = this.buildLoginParams({
-                username,
-                password,
-                endpoint,
-                websocket,
-                saveCredentials
+        try {
+            await this.vrchatRequest('config');
+            const auth = Buffer.from(
+                `${encodeURIComponent(username)}:${encodeURIComponent(password)}`
+            ).toString('base64');
+            const user = await this.vrchatRequest('auth/user', {
+                method: 'GET',
+                headers: {
+                    Authorization: `Basic ${auth}`
+                }
             });
-            console.log(
-                `VRChat login requires 2FA: ${this.pendingTwoFactor.join(', ')}`
-            );
-            this.broadcast({ type: 'state', state: this.state() });
-            return {
-                requiresTwoFactorAuth: this.pendingTwoFactor
-            };
-        }
 
-        await this.completeLogin(
-            user,
-            saveCredentials
-                ? {
-                      username,
-                      password,
-                      endpoint: endpoint || '',
-                      websocket: websocket || ''
-                  }
-                : null
-        );
-        return user;
+            if (user?.requiresTwoFactorAuth) {
+                await this.enterTwoFactor(user, loginParams);
+                console.log(
+                    `VRChat login requires 2FA: ${this.pendingTwoFactor.join(', ')}`
+                );
+                return {
+                    requiresTwoFactorAuth: this.pendingTwoFactor
+                };
+            }
+
+            await this.completeLogin(user, loginParams);
+            return user;
+        } catch (err) {
+            if (this.authState !== 'awaiting_2fa') {
+                this.pendingTwoFactor = [];
+                this.pendingLoginParams = null;
+                await this.persistPendingLogin();
+                this.setAuthState('logged_out', err.message || 'Login failed');
+                this.broadcast({ type: 'state', state: this.state() });
+            }
+            throw err;
+        }
     }
 
     async verifyTwoFactor(type, code) {
+        return await this.runAuthOperation(() =>
+            this.verifyTwoFactorInternal(type, code)
+        );
+    }
+
+    async verifyTwoFactorInternal(type, code) {
         const endpoints = {
             otp: 'auth/twofactorauth/otp/verify',
             totp: 'auth/twofactorauth/totp/verify',
@@ -950,36 +1275,89 @@ class HeadlessSession {
             err.status = 400;
             throw err;
         }
-        await this.vrchatRequest(endpoint, {
-            method: 'POST',
-            params: { code }
+        if (this.authState !== 'awaiting_2fa' || !this.pendingTwoFactor.length) {
+            const err = new Error(
+                'No pending VRChat login. Please submit username and password again.'
+            );
+            err.status = 409;
+            throw err;
+        }
+        if (!code || !String(code).trim()) {
+            const err = new Error('Two-factor authentication code is required.');
+            err.status = 400;
+            throw err;
+        }
+
+        try {
+            await this.vrchatRequest(endpoint, {
+                method: 'POST',
+                params: { code: String(code).trim() }
+            });
+            const user = await this.vrchatRequest('auth/user');
+            if (user?.requiresTwoFactorAuth) {
+                await this.enterTwoFactor(user, this.pendingLoginParams);
+                const err = new Error('VRChat did not accept the two-factor code.');
+                err.status = 401;
+                throw err;
+            }
+            const loginParams = this.pendingLoginParams;
+            await this.completeLogin(user, loginParams);
+            console.log(`VRChat 2FA verified for ${user.displayName || user.id}`);
+            return user;
+        } catch (err) {
+            if (this.authState !== 'authenticated') {
+                this.setAuthState('awaiting_2fa', err.message || '2FA verification failed');
+                this.broadcast({ type: 'state', state: this.state() });
+            }
+            throw err;
+        }
+    }
+
+    async resendEmailTwoFactor() {
+        return await this.runAuthOperation(async () => {
+            if (
+                this.authState !== 'awaiting_2fa' ||
+                !this.pendingLoginParams?.username ||
+                !this.pendingLoginParams?.password
+            ) {
+                const err = new Error(
+                    'No pending login credentials are available to resend email 2FA.'
+                );
+                err.status = 409;
+                throw err;
+            }
+            const result = await this.loginInternal(this.pendingLoginParams);
+            if (!result?.requiresTwoFactorAuth?.includes('emailOtp')) {
+                const err = new Error('VRChat did not request email 2FA.');
+                err.status = 409;
+                throw err;
+            }
+            return result;
         });
-        const user = await this.vrchatRequest('auth/user');
-        const loginParams = this.pendingLoginParams;
-        this.pendingLoginParams = null;
-        await this.completeLogin(user, loginParams);
-        console.log(`VRChat 2FA verified for ${user.displayName || user.id}`);
-        return user;
     }
 
     async logout() {
-        this.loggedIn = false;
-        this.currentUser = null;
-        this.pendingTwoFactor = [];
-        this.pendingLoginParams = null;
-        this.friends.clear();
-        this.closePipeline();
-        this.stopFriendRefreshLoop();
-        await this.clearCookies();
-        await this.configRemove('lastUserLoggedIn');
-        this.broadcast({ type: 'state', state: this.state() });
+        return await this.runAuthOperation(async () => {
+            this.stopAuthenticatedServices();
+            this.currentUser = null;
+            this.pendingTwoFactor = [];
+            this.pendingLoginParams = null;
+            this.friends.clear();
+            this.setAuthState('logged_out');
+            await this.persistPendingLogin();
+            await this.clearCookies();
+            await this.configRemove('lastUserLoggedIn');
+            this.autoRecoveryDisabled = true;
+            await this.configSet('headlessAutoRecoveryDisabled', 'true');
+            this.broadcast({ type: 'state', state: this.state() });
+        });
     }
 
     startAuthRecoveryLoop() {
         this.stopAuthRecoveryLoop();
         this.authRecoveryTimer = setInterval(() => {
-            this.ensureAuthenticated().catch((err) => {
-                console.warn('Auth recovery failed:', err.message || err);
+            this.maintainAuthentication().catch((err) => {
+                console.warn('Auth maintenance failed:', err.message || err);
             });
         }, 60000);
         this.authRecoveryTimer.unref?.();
@@ -993,37 +1371,122 @@ class HeadlessSession {
     }
 
     async ensureAuthenticated() {
-        if (this.loggedIn || this.pendingTwoFactor.length || this.authRecoveryInFlight) {
+        if (
+            this.authState === 'authenticated' ||
+            this.authState === 'awaiting_2fa' ||
+            this.authState === 'authenticating' ||
+            this.authRecoveryInFlight
+        ) {
             return false;
         }
-        this.authRecoveryInFlight = true;
-        try {
-            const restored = await this.tryRestoreSession();
+        return await this.runAuthOperation(async () => {
+            if (
+                this.authState === 'authenticated' ||
+                this.authState === 'awaiting_2fa' ||
+                this.authState === 'authenticating'
+            ) {
+                return false;
+            }
+            this.authRecoveryInFlight = true;
+            this.setAuthState('recovering');
             this.broadcast({ type: 'state', state: this.state() });
-            return restored;
-        } finally {
-            this.authRecoveryInFlight = false;
+            try {
+                const restored = await this.tryRestoreSession();
+                if (restored) {
+                    this.lastAuthRecoveryAt = Date.now();
+                    this.authRecoveryCount++;
+                }
+                if (
+                    !restored &&
+                    this.authState === 'recovering' &&
+                    !this.authStateReason
+                ) {
+                    this.setAuthState('logged_out', 'No reusable VRChat session');
+                }
+                this.broadcast({ type: 'state', state: this.state() });
+                return restored;
+            } finally {
+                this.authRecoveryInFlight = false;
+            }
+        });
+    }
+
+    async maintainAuthentication() {
+        if (!this.loggedIn || this.authState !== 'authenticated') {
+            return await this.ensureAuthenticated();
         }
+        if (Date.now() - this.lastAuthValidationAt < authValidationIntervalMs) {
+            return false;
+        }
+
+        return await this.runAuthOperation(async () => {
+            if (!this.loggedIn || this.authState !== 'authenticated') return false;
+            if (Date.now() - this.lastAuthValidationAt < authValidationIntervalMs) {
+                return false;
+            }
+            try {
+                const user = await this.requestCurrentUser();
+                if (user?.requiresTwoFactorAuth) {
+                    const lastUserLoggedIn = await this.configGet(
+                        'lastUserLoggedIn',
+                        ''
+                    );
+                    const savedCredentials = await this.getSavedCredentials();
+                    await this.enterTwoFactor(
+                        user,
+                        savedCredentials[lastUserLoggedIn]?.loginParams || null
+                    );
+                    return false;
+                }
+                this.currentUser = user;
+                this.lastAuthValidationAt = Date.now();
+                await this.saveCredential(user);
+                this.broadcast({ type: 'state', state: this.state() });
+                return true;
+            } catch (err) {
+                // Authentication 401s schedule recovery in webApiExecute. Network
+                // errors leave the current session intact for the next probe.
+                if (this.authState !== 'recovering') {
+                    console.warn('VRChat session validation failed:', err.message || err);
+                }
+                return false;
+            }
+        });
     }
 
     async completeLogin(user, loginParams = null) {
+        if (!user?.id || user?.requiresTwoFactorAuth) {
+            const err = new Error('VRChat login is not fully authenticated.');
+            err.status = 401;
+            throw err;
+        }
         this.currentUser = user;
-        this.loggedIn = true;
-        this.pendingTwoFactor = [];
         await this.initUserTables(user.id);
-        await this.saveCredential(user, loginParams, !!loginParams);
-        await this.loadFriendSnapshot();
-        await this.backfillSelfInstanceActivityFromLocations();
-        await this.connectPipeline();
-        this.startFriendRefreshLoop();
+        await this.saveCredential(user, loginParams);
+        this.loggedIn = true;
+        this.lastAuthValidationAt = Date.now();
+        this.pendingTwoFactor = [];
+        this.pendingLoginParams = null;
+        this.setAuthState('authenticated');
+        await this.persistPendingLogin();
         this.broadcast({ type: 'state', state: this.state() });
-        this.backfillFeedFromPipelineEvents()
-            .then(() => {
-                this.broadcast({ type: 'feed-refresh' });
-            })
-            .catch((err) => {
-                console.warn('Feed backfill failed:', err.message || err);
-            });
+        this.connectPipeline().catch((err) => {
+            console.warn('Initial Pipeline connection failed:', err.message || err);
+        });
+        this.initializeAuthenticatedData(user.id).catch((err) => {
+            console.warn('Post-login initialization failed:', err.message || err);
+        });
+    }
+
+    async initializeAuthenticatedData(userId) {
+        await this.loadFriendSnapshot();
+        if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        await this.backfillSelfInstanceActivityFromLocations();
+        if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        this.startFriendRefreshLoop();
+        await this.backfillFeedFromPipelineEvents();
+        if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        this.broadcast({ type: 'feed-refresh' });
     }
 
     async backfillSelfInstanceActivityFromLocations() {
@@ -1208,6 +1671,15 @@ class HeadlessSession {
             });
         } catch (err) {
             console.warn('Failed to connect VRChat Pipeline:', err.message || err);
+            if (
+                this.loggedIn &&
+                String(err?.message || '').toLowerCase().includes('two-factor')
+            ) {
+                await this.markAuthenticationLost(
+                    'VRChat requires two-factor authentication again'
+                );
+                return;
+            }
             this.schedulePipelineReconnect();
         }
     }
@@ -1316,8 +1788,9 @@ class HeadlessSession {
             if (typeof json.content === 'string') {
                 json.content = JSON.parse(json.content);
             }
-            await this.persistPipelineEvent(json);
-            const feedChanged = await this.applyPipelineEvent(json);
+            const receivedAt = new Date().toJSON();
+            await this.persistPipelineEvent(json, receivedAt);
+            const feedChanged = await this.applyPipelineEvent(json, receivedAt);
             this.augmentPipelineEvent(json);
             this.broadcast({ type: 'pipeline', event: json });
             if (feedChanged) {
@@ -1328,10 +1801,9 @@ class HeadlessSession {
         }
     }
 
-    async persistPipelineEvent(event) {
+    async persistPipelineEvent(event, createdAt = new Date().toJSON()) {
         const content = event.content || {};
         const userId = content.userId || content.user?.id || '';
-        const createdAt = new Date().toJSON();
         const data = JSON.stringify(event);
         await this.sqliteNonQuery(
             'INSERT OR IGNORE INTO headless_pipeline_events (created_at, type, user_id, data) VALUES (@created_at, @type, @user_id, @data)',
@@ -1344,7 +1816,7 @@ class HeadlessSession {
         );
     }
 
-    async applyPipelineEvent(event) {
+    async applyPipelineEvent(event, createdAt = new Date().toJSON()) {
         const content = event.content || {};
         switch (event.type) {
             case 'notification':
@@ -1455,12 +1927,19 @@ class HeadlessSession {
                 break;
             case 'user-location':
                 if (content.userId === this.currentUser?.id) {
+                    const gameLogChanged = await this.applyPipelineSelfLocation(
+                        content,
+                        createdAt
+                    );
                     this.currentUser = {
                         ...this.currentUser,
                         location: content.location,
                         travelingToLocation: content.travelingToLocation
                     };
                     await this.saveCredential(this.currentUser);
+                    if (gameLogChanged) {
+                        this.broadcast({ type: 'game-log-refresh' });
+                    }
                 }
                 break;
             default:
@@ -2537,6 +3016,7 @@ class HeadlessSession {
                 lastError: '',
                 currentLocation: '',
                 currentLocationAt: 0,
+                currentLocationCreatedAt: '',
                 currentWorldName: '',
                 destinationLocation: '',
                 players: new Map()
@@ -2729,6 +3209,187 @@ class HeadlessSession {
         return true;
     }
 
+    // Raw source tables stay source-specific. gamelog_* is the normalized UI
+    // activity layer, so self instance boundaries share one writer for de-dupe.
+    selfDisplayName() {
+        const userId = this.currentUser?.id || '';
+        return this.currentUser?.displayName || this.currentUser?.username || userId;
+    }
+
+    async findNearbyLocationSegment(createdAt, location, windowSeconds = 30) {
+        const rows = await this.sqliteExecute(
+            `SELECT created_at, time
+             FROM gamelog_location
+             WHERE location = @location
+               AND ABS((julianday(created_at) - julianday(@created_at)) * 86400.0) <= @window_seconds
+             ORDER BY ABS((julianday(created_at) - julianday(@created_at)) * 86400.0) ASC
+             LIMIT 1`,
+            {
+                '@created_at': createdAt,
+                '@location': location,
+                '@window_seconds': windowSeconds
+            }
+        );
+        return rows[0] || null;
+    }
+
+    async findNearbySelfJoinLeave(type, createdAt, location, windowSeconds = 30) {
+        if (!this.currentUser?.id) return null;
+        const rows = await this.sqliteExecute(
+            `SELECT id, created_at, time
+             FROM gamelog_join_leave
+             WHERE user_id = @user_id
+               AND type = @type
+               AND location = @location
+               AND ABS((julianday(created_at) - julianday(@created_at)) * 86400.0) <= @window_seconds
+             ORDER BY ABS((julianday(created_at) - julianday(@created_at)) * 86400.0) ASC
+             LIMIT 1`,
+            {
+                '@user_id': this.currentUser.id,
+                '@type': type,
+                '@created_at': createdAt,
+                '@location': location,
+                '@window_seconds': windowSeconds
+            }
+        );
+        return rows[0] || null;
+    }
+
+    async recordSelfInstanceJoin({ createdAt, location, worldName = '' }) {
+        if (!this.currentUser?.id || !isRealInstance(location)) return '';
+        const existingSegment = await this.findNearbyLocationSegment(createdAt, location);
+        const locationCreatedAt = existingSegment?.created_at || createdAt;
+        if (!existingSegment) {
+            const parsedLocation = parseLocation(location);
+            const names = await this.locationNames(location);
+            await this.sqliteNonQuery(
+                'INSERT OR IGNORE INTO gamelog_location (created_at, location, world_id, world_name, time, group_name) VALUES (@created_at, @location, @world_id, @world_name, @time, @group_name)',
+                {
+                    '@created_at': createdAt,
+                    '@location': location,
+                    '@world_id': parsedLocation.worldId,
+                    '@world_name': worldName || names.worldName || '',
+                    '@time': 0,
+                    '@group_name': names.groupName || ''
+                }
+            );
+        }
+
+        const existingJoin = await this.findNearbySelfJoinLeave(
+            'OnPlayerJoined',
+            createdAt,
+            location
+        );
+        if (!existingJoin) {
+            await this.sqliteNonQuery(
+                'INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time) VALUES (@created_at, @type, @display_name, @location, @user_id, @time)',
+                {
+                    '@created_at': createdAt,
+                    '@type': 'OnPlayerJoined',
+                    '@display_name': this.selfDisplayName(),
+                    '@location': location,
+                    '@user_id': this.currentUser.id,
+                    '@time': 0
+                }
+            );
+        }
+        return locationCreatedAt;
+    }
+
+    async recordSelfInstanceLeave({
+        createdAt,
+        location,
+        locationCreatedAt = '',
+        locationAt = 0,
+        time = null
+    }) {
+        if (!this.currentUser?.id || !isRealInstance(location)) return false;
+        const leaveTime = Date.parse(createdAt) || Date.now();
+        const joinedAt =
+            Date.parse(locationCreatedAt) || Number(locationAt || 0) || leaveTime;
+        const duration = Math.max(
+            0,
+            Number.isFinite(time) && time !== null ? time : leaveTime - joinedAt
+        );
+
+        if (locationCreatedAt) {
+            await this.sqliteNonQuery(
+                `UPDATE gamelog_location
+                 SET time = CASE WHEN time IS NULL OR time < @time THEN @time ELSE time END
+                 WHERE created_at = @created_at AND location = @location`,
+                {
+                    '@created_at': locationCreatedAt,
+                    '@location': location,
+                    '@time': duration
+                }
+            );
+        }
+
+        const existingLeave = await this.findNearbySelfJoinLeave(
+            'OnPlayerLeft',
+            createdAt,
+            location
+        );
+        if (existingLeave) return false;
+        await this.sqliteNonQuery(
+            'INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time) VALUES (@created_at, @type, @display_name, @location, @user_id, @time)',
+            {
+                '@created_at': createdAt,
+                '@type': 'OnPlayerLeft',
+                '@display_name': this.selfDisplayName(),
+                '@location': location,
+                '@user_id': this.currentUser.id,
+                '@time': duration
+            }
+        );
+        return true;
+    }
+
+    async applyPipelineSelfLocation(content, createdAt) {
+        const nextLocation = content.location || '';
+        const current = this.pipelineSelfInstance;
+        let changed = false;
+
+        if (current.location && current.location !== nextLocation) {
+            await this.recordSelfInstanceLeave({
+                createdAt,
+                location: current.location,
+                locationCreatedAt: current.locationCreatedAt,
+                locationAt: current.locationAt
+            });
+            changed = true;
+        }
+
+        if (isRealInstance(nextLocation)) {
+            if (current.location !== nextLocation) {
+                const locationCreatedAt = await this.recordSelfInstanceJoin({
+                    createdAt,
+                    location: nextLocation,
+                    worldName: content.worldName || ''
+                });
+                this.pipelineSelfInstance = {
+                    location: nextLocation,
+                    locationAt:
+                        Date.parse(locationCreatedAt) ||
+                        Date.parse(createdAt) ||
+                        Date.now(),
+                    locationCreatedAt: locationCreatedAt || createdAt,
+                    worldName: content.worldName || ''
+                };
+                changed = true;
+            }
+        } else if (current.location) {
+            this.pipelineSelfInstance = {
+                location: '',
+                locationAt: 0,
+                locationCreatedAt: '',
+                worldName: ''
+            };
+        }
+
+        return changed;
+    }
+
     async applyLogStreamEvent(machineId, event) {
         const rawLog = Array.isArray(event.rawLog) ? event.rawLog : [];
         const parsed = event.parsed || {};
@@ -2743,24 +3404,32 @@ class HeadlessSession {
                 const worldName = args[1] || '';
                 if (!location) return false;
                 await this.closePreviousStreamLocation(client, createdAt);
-                const parsedLocation = parseLocation(location);
-                const { groupName } = await this.locationNames(location);
-                await this.sqliteNonQuery(
-                    'INSERT OR IGNORE INTO gamelog_location (created_at, location, world_id, world_name, time, group_name) VALUES (@created_at, @location, @world_id, @world_name, @time, @group_name)',
-                    {
-                        '@created_at': createdAt,
-                        '@location': location,
-                        '@world_id': parsedLocation.worldId,
-                        '@world_name': worldName || '',
-                        '@time': 0,
-                        '@group_name': groupName || ''
-                    }
-                );
+                const locationCreatedAt = isRealInstance(location)
+                    ? await this.addStreamSelfJoin(client, createdAt, location, worldName)
+                    : createdAt;
+                if (!isRealInstance(location)) {
+                    const parsedLocation = parseLocation(location);
+                    const { groupName } = await this.locationNames(location);
+                    await this.sqliteNonQuery(
+                        'INSERT OR IGNORE INTO gamelog_location (created_at, location, world_id, world_name, time, group_name) VALUES (@created_at, @location, @world_id, @world_name, @time, @group_name)',
+                        {
+                            '@created_at': createdAt,
+                            '@location': location,
+                            '@world_id': parsedLocation.worldId,
+                            '@world_name': worldName || '',
+                            '@time': 0,
+                            '@group_name': groupName || ''
+                        }
+                    );
+                }
                 client.currentLocation = location;
                 client.currentWorldName = worldName || '';
-                client.currentLocationAt = Date.parse(createdAt) || Date.now();
+                client.currentLocationCreatedAt = locationCreatedAt || createdAt;
+                client.currentLocationAt =
+                    Date.parse(client.currentLocationCreatedAt) ||
+                    Date.parse(createdAt) ||
+                    Date.now();
                 client.players.clear();
-                await this.addStreamSelfJoin(client, createdAt, location);
                 return true;
             }
             case 'location-destination':
@@ -2768,6 +3437,7 @@ class HeadlessSession {
                 await this.closePreviousStreamLocation(client, createdAt);
                 client.currentLocation = '';
                 client.currentLocationAt = 0;
+                client.currentLocationCreatedAt = '';
                 client.currentWorldName = '';
                 client.players.clear();
                 return true;
@@ -2806,14 +3476,18 @@ class HeadlessSession {
         if (!client.currentLocation || !client.currentLocationAt) return;
         const nextTime = Date.parse(nextCreatedAt) || Date.now();
         const time = Math.max(0, nextTime - client.currentLocationAt);
-        await this.sqliteNonQuery(
-            'UPDATE gamelog_location SET time = @time WHERE location = @location AND created_at = (SELECT created_at FROM gamelog_location WHERE location = @location ORDER BY id DESC LIMIT 1)',
-            {
-                '@location': client.currentLocation,
-                '@time': time
-            }
-        );
-        await this.addStreamSelfLeft(client, nextCreatedAt, time);
+        if (isRealInstance(client.currentLocation)) {
+            await this.addStreamSelfLeft(client, nextCreatedAt, time);
+        } else {
+            await this.sqliteNonQuery(
+                'UPDATE gamelog_location SET time = @time WHERE created_at = @created_at AND location = @location',
+                {
+                    '@created_at': client.currentLocationCreatedAt || nextCreatedAt,
+                    '@location': client.currentLocation,
+                    '@time': time
+                }
+            );
+        }
     }
 
     async addStreamJoinLeave(client, createdAt, type, args) {
@@ -2848,44 +3522,33 @@ class HeadlessSession {
         return true;
     }
 
-    async addStreamSelfJoin(client, createdAt, location) {
-        if (!this.currentUser?.id || !location || location === 'traveling') return;
+    async addStreamSelfJoin(client, createdAt, location, worldName = '') {
+        if (!this.currentUser?.id || !isRealInstance(location)) return createdAt;
         const key = this.currentUser.id;
-        const now = Date.parse(createdAt) || Date.now();
+        const locationCreatedAt = await this.recordSelfInstanceJoin({
+            createdAt,
+            location,
+            worldName
+        });
+        const now = Date.parse(locationCreatedAt) || Date.parse(createdAt) || Date.now();
         client.players.set(key, {
             displayName: this.currentUser.displayName || this.currentUser.username || key,
             userId: key,
             joinTime: now
         });
-        await this.sqliteNonQuery(
-            'INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time) VALUES (@created_at, @type, @display_name, @location, @user_id, @time)',
-            {
-                '@created_at': createdAt,
-                '@type': 'OnPlayerJoined',
-                '@display_name':
-                    this.currentUser.displayName || this.currentUser.username || key,
-                '@location': location,
-                '@user_id': key,
-                '@time': 0
-            }
-        );
+        return locationCreatedAt || createdAt;
     }
 
     async addStreamSelfLeft(client, createdAt, time) {
         if (!this.currentUser?.id || !client.currentLocation) return;
         const key = this.currentUser.id;
-        await this.sqliteNonQuery(
-            'INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time) VALUES (@created_at, @type, @display_name, @location, @user_id, @time)',
-            {
-                '@created_at': createdAt,
-                '@type': 'OnPlayerLeft',
-                '@display_name':
-                    this.currentUser.displayName || this.currentUser.username || key,
-                '@location': client.currentLocation,
-                '@user_id': key,
-                '@time': Math.max(0, time || 0)
-            }
-        );
+        await this.recordSelfInstanceLeave({
+            createdAt,
+            location: client.currentLocation,
+            locationCreatedAt: client.currentLocationCreatedAt,
+            locationAt: client.currentLocationAt,
+            time
+        });
         client.players.delete(key);
     }
 
@@ -2960,6 +3623,21 @@ async function handleHeadlessRoute(req, res, url) {
         return true;
     }
 
+    if (
+        req.method === 'GET' &&
+        url.pathname === '/headless/session/current-user'
+    ) {
+        if (!session.loggedIn || !session.currentUser) {
+            jsonResponse(res, 401, {
+                error: { message: 'The backend is not logged in.' },
+                state: session.state()
+            });
+        } else {
+            jsonResponse(res, 200, session.currentUser);
+        }
+        return true;
+    }
+
     if (!url.pathname.startsWith('/headless/')) return false;
 
     try {
@@ -2974,6 +3652,24 @@ async function handleHeadlessRoute(req, res, url) {
             jsonResponse(res, 200, { ok: true });
             return true;
         }
+        if (req.method === 'POST' && url.pathname === '/headless/session/recover') {
+            await session.ensureAuthenticated();
+            if (session.loggedIn && session.currentUser) {
+                jsonResponse(res, 200, session.currentUser);
+            } else {
+                jsonResponse(res, 409, {
+                    error: {
+                        message:
+                            session.authStateReason ||
+                            (session.authState === 'awaiting_2fa'
+                                ? 'Two-factor authentication is required.'
+                                : 'No reusable VRChat session is available.')
+                    },
+                    state: session.state()
+                });
+            }
+            return true;
+        }
         const twoFactorMatch = url.pathname.match(
             /^\/headless\/session\/2fa\/([^/]+)$/
         );
@@ -2983,6 +3679,13 @@ async function handleHeadlessRoute(req, res, url) {
                 200,
                 await session.verifyTwoFactor(twoFactorMatch[1], body.code)
             );
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/session/2fa/email/resend'
+        ) {
+            jsonResponse(res, 200, await session.resendEmailTwoFactor());
             return true;
         }
         if (
@@ -3040,8 +3743,12 @@ async function handleHeadlessRoute(req, res, url) {
             req.method === 'POST' &&
             url.pathname === '/headless/webapi/clearCookies'
         ) {
-            await session.clearCookies();
-            jsonResponse(res, 200, { ok: true });
+            jsonResponse(res, 409, {
+                error: {
+                    message:
+                        'Cookie ownership belongs to the headless backend. Use the session login or logout endpoint.'
+                }
+            });
             return true;
         }
         if (req.method === 'POST' && url.pathname === '/headless/webapi/getCookies') {
@@ -3051,8 +3758,12 @@ async function handleHeadlessRoute(req, res, url) {
             return true;
         }
         if (req.method === 'POST' && url.pathname === '/headless/webapi/setCookies') {
-            await session.setCookies(body.cookies || body.value || '');
-            jsonResponse(res, 200, { ok: true });
+            jsonResponse(res, 409, {
+                error: {
+                    message:
+                        'Cookie ownership belongs to the headless backend. Browser cookie restore is disabled.'
+                }
+            });
             return true;
         }
 
@@ -3229,7 +3940,14 @@ async function bootstrap() {
     process.on('SIGINT', shutdown);
 }
 
-bootstrap().catch((err) => {
-    console.error(err);
-    process.exit(1);
-});
+if (require.main === module) {
+    bootstrap().catch((err) => {
+        console.error(err);
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    CookieJar,
+    HeadlessSession
+};

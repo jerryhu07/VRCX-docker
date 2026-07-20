@@ -1,4 +1,4 @@
-FROM node:24-bookworm AS node-build
+FROM --platform=$BUILDPLATFORM node:24-bookworm AS node-build
 
 ARG TARGETARCH
 
@@ -15,7 +15,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         node ./src-electron/download-dotnet-runtime.js --arch=x64 --platform=linux; \
     fi
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS dotnet-build
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:9.0 AS dotnet-build
 
 ARG TARGETARCH
 
@@ -29,7 +29,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         dotnet build Dotnet/VRCX-Electron.csproj -c Release -p:Platform=x64; \
     fi
 
-FROM node:24-bookworm-slim AS runtime
+FROM --platform=$TARGETPLATFORM node:24-bookworm-slim AS runtime
 
 ARG TARGETARCH
 

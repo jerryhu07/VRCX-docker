@@ -2,6 +2,7 @@ import { reactive } from 'vue';
 import { toast } from 'vue-sonner';
 
 import {
+    useAuthStore,
     useFriendStore,
     useFeedStore,
     useGalleryStore,
@@ -109,6 +110,11 @@ function connectHeadlessEvents() {
             if (payload.type === 'state' && payload.state) {
                 wsState.connected = !!payload.state.websocketConnected;
                 wsState.messageCount = payload.state.websocketMessageCount || 0;
+                useAuthStore()
+                    .syncHeadlessSessionState(payload.state)
+                    .catch((err) => {
+                        console.error('Failed to sync headless auth state:', err);
+                    });
                 if (payload.state.loggedIn) {
                     scheduleHeadlessFeedLookup();
                 }

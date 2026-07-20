@@ -43,7 +43,24 @@ async function headlessSessionPost(path, body = {}) {
     });
     const json = await response.json().catch(() => ({}));
     if (!response.ok) {
-        throw new Error(json?.error?.message || response.statusText);
+        const error = Object.assign(
+            new Error(json?.error?.message || response.statusText),
+            { status: response.status, payload: json }
+        );
+        throw error;
+    }
+    return json;
+}
+
+async function headlessSessionGet(path) {
+    const response = await fetch(path, { cache: 'no-store' });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const error = Object.assign(
+            new Error(json?.error?.message || response.statusText),
+            { status: response.status, payload: json }
+        );
+        throw error;
     }
     return json;
 }
@@ -103,6 +120,7 @@ export const useAuthStore = defineStore('Auth', () => {
         ([isLoggedIn, currentUser]) => {
             twoFactorAuthDialogVisible.value = false;
             if (isLoggedIn) {
+                loginForm.value.loading = false;
                 resetLoginNetworkIssueHintState();
                 updateStoredUser(currentUser);
                 new Noty({
@@ -200,9 +218,13 @@ export const useAuthStore = defineStore('Auth', () => {
     /**
      *
      */
-    async function handleLogoutEvent() {
+    async function handleLogoutEvent({ logoutBackend = false } = {}) {
         await runLogoutFlow();
-        if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+        if (
+            logoutBackend &&
+            typeof window !== 'undefined' &&
+            window.__VRCX_HEADLESS__
+        ) {
             await headlessSessionPost('/headless/session/logout');
         }
     }
@@ -217,6 +239,26 @@ export const useAuthStore = defineStore('Auth', () => {
             console.warn(
                 'Skipping auto-login after mount because database initialization did not complete successfully.'
             );
+            return;
+        }
+        if (isHeadlessMode()) {
+            initWebsocket();
+            loginForm.value.loading = true;
+            try {
+                const user = await headlessSessionPost(
+                    '/headless/session/recover'
+                );
+                handleCurrentUserUpdate(user);
+            } catch (err) {
+                const state =
+                    err?.payload?.state ||
+                    (await headlessSessionGet('/headless/state').catch(() => null));
+                await syncHeadlessSessionState(state);
+            } finally {
+                if (!twoFactorAuthDialogVisible.value) {
+                    loginForm.value.loading = false;
+                }
+            }
             return;
         }
         if (
@@ -251,6 +293,10 @@ export const useAuthStore = defineStore('Auth', () => {
      *
      */
     async function clearCookiesTryLogin() {
+        if (isHeadlessMode()) {
+            await handleAutoLogin();
+            return;
+        }
         await webApiService.clearCookies();
         if (loginForm.value.lastUserLoggedIn) {
             const user = await getSavedCredentials(
@@ -269,6 +315,19 @@ export const useAuthStore = defineStore('Auth', () => {
      *
      */
     async function resendEmail2fa() {
+        if (isHeadlessMode()) {
+            try {
+                const result = await headlessSessionPost(
+                    '/headless/session/2fa/email/resend'
+                );
+                toast.success(t('message.auth.email_2fa_resent'));
+                handleCurrentUserUpdate(result);
+            } catch (err) {
+                showLoginError(err);
+                loginForm.value.loading = false;
+            }
+            return;
+        }
         if (loginForm.value.lastUserLoggedIn) {
             const user = await getSavedCredentials(
                 loginForm.value.lastUserLoggedIn
@@ -490,6 +549,7 @@ export const useAuthStore = defineStore('Auth', () => {
      * @param user
      */
     async function updateStoredUser(user) {
+        if (isHeadlessMode()) return;
         const savedCredentials = await getAllSavedCredentials();
         if (credentialsToSave.value) {
             savedCredentials[user.id] = {
@@ -521,6 +581,7 @@ export const useAuthStore = defineStore('Auth', () => {
      *
      */
     async function migrateStoredUsers() {
+        if (isHeadlessMode()) return;
         const savedCredentials = await getAllSavedCredentials();
         for (const name in savedCredentials) {
             const userId = savedCredentials[name]?.user?.id;
@@ -595,7 +656,7 @@ export const useAuthStore = defineStore('Auth', () => {
                 if (existingStyle) {
                     existingStyle.parentNode.removeChild(existingStyle);
                 }
-                handleLogoutEvent();
+                handleLogoutEvent({ logoutBackend: true });
             })
             .catch(() => {});
     }
@@ -609,7 +670,7 @@ export const useAuthStore = defineStore('Auth', () => {
         { shouldTrackLoginNetworkIssueHint = !attemptingAutoLogin.value } = {}
     ) {
         const { loginParams } = user;
-        if (user.cookies) {
+        if (user.cookies && !isHeadlessMode()) {
             await webApiService.setCookies(user.cookies);
         }
         loginForm.value.lastUserLoggedIn = user.user.id; // for resend email 2fa
@@ -623,6 +684,13 @@ export const useAuthStore = defineStore('Auth', () => {
 
         loginForm.value.loading = true;
         try {
+            if (isHeadlessMode()) {
+                const recoveredUser = await headlessSessionPost(
+                    '/headless/session/recover'
+                );
+                handleCurrentUserUpdate(recoveredUser);
+                return;
+            }
             let password = loginParams.password;
             if (shouldTrackLoginNetworkIssueHint) {
                 resetLoginNetworkIssueHintStateIfCredentialsChanged({
@@ -656,7 +724,9 @@ export const useAuthStore = defineStore('Auth', () => {
                 ) {
                     maybeShowLoginNetworkIssueHint();
                 }
-                await handleLogoutEvent();
+                if (!isHeadlessMode()) {
+                    await handleLogoutEvent();
+                }
                 throw err;
             }
         } catch (err) {
@@ -696,9 +766,11 @@ export const useAuthStore = defineStore('Auth', () => {
      */
     async function login() {
         // TODO: remove/refactor saveCredentials & primaryPassword (security)
-        await webApiService.clearCookies();
         if (!loginForm.value.loading) {
             loginForm.value.loading = true;
+            if (!isHeadlessMode()) {
+                await webApiService.clearCookies();
+            }
             resetLoginNetworkIssueHintStateIfCredentialsChanged({
                 username: loginForm.value.username,
                 password: loginForm.value.password,
@@ -713,9 +785,14 @@ export const useAuthStore = defineStore('Auth', () => {
                 AppDebug.websocketDomain = AppDebug.websocketDomainVrchat;
             }
             try {
-                await authRequest.getConfig();
+                if (!isHeadlessMode()) {
+                    await authRequest.getConfig();
+                }
+                const effectiveSaveCredentials =
+                    isHeadlessMode() || loginForm.value.saveCredentials;
                 if (
-                    loginForm.value.saveCredentials &&
+                    effectiveSaveCredentials &&
+                    !isHeadlessMode() &&
                     advancedSettingsStore.enablePrimaryPassword
                 ) {
                     try {
@@ -751,8 +828,7 @@ export const useAuthStore = defineStore('Auth', () => {
                                     password: loginForm.value.password,
                                     endpoint: loginForm.value.endpoint,
                                     websocket: loginForm.value.websocket,
-                                    saveCredentials:
-                                        loginForm.value.saveCredentials,
+                                    saveCredentials: effectiveSaveCredentials,
                                     cipher: pwd
                                 });
                             } catch (err) {
@@ -774,7 +850,7 @@ export const useAuthStore = defineStore('Auth', () => {
                             password: loginForm.value.password,
                             endpoint: loginForm.value.endpoint,
                             websocket: loginForm.value.websocket,
-                            saveCredentials: loginForm.value.saveCredentials
+                            saveCredentials: effectiveSaveCredentials
                         });
                     } catch (err) {
                         if (shouldCountLoginFailureForNetworkHint(err)) {
@@ -784,7 +860,9 @@ export const useAuthStore = defineStore('Auth', () => {
                     }
                 }
             } finally {
-                loginForm.value.loading = false;
+                if (!isHeadlessMode() || !twoFactorAuthDialogVisible.value) {
+                    loginForm.value.loading = false;
+                }
             }
         }
     }
@@ -813,7 +891,10 @@ export const useAuthStore = defineStore('Auth', () => {
                     promptOTP();
                     return;
                 }
-                if (!ok) return;
+                if (!ok) {
+                    loginForm.value.loading = false;
+                    return;
+                }
 
                 authRequest
                     .verifyTOTP({
@@ -824,11 +905,12 @@ export const useAuthStore = defineStore('Auth', () => {
                     })
                     .catch((err) => {
                         console.error(err);
-                        clearCookiesTryLogin();
+                        handleTwoFactorFailure(err, promptTOTP);
                     });
             })
             .catch(() => {
                 twoFactorAuthDialogVisible.value = false;
+                loginForm.value.loading = false;
             });
     }
 
@@ -855,7 +937,10 @@ export const useAuthStore = defineStore('Auth', () => {
                     promptTOTP();
                     return;
                 }
-                if (!ok) return;
+                if (!ok) {
+                    loginForm.value.loading = false;
+                    return;
+                }
 
                 authRequest
                     .verifyOTP({
@@ -866,11 +951,12 @@ export const useAuthStore = defineStore('Auth', () => {
                     })
                     .catch((err) => {
                         console.error(err);
-                        clearCookiesTryLogin();
+                        handleTwoFactorFailure(err, promptOTP);
                     });
             })
             .catch(() => {
                 twoFactorAuthDialogVisible.value = false;
+                loginForm.value.loading = false;
             });
     }
 
@@ -898,7 +984,10 @@ export const useAuthStore = defineStore('Auth', () => {
                     resendEmail2fa();
                     return;
                 }
-                if (!ok) return;
+                if (!ok) {
+                    loginForm.value.loading = false;
+                    return;
+                }
 
                 authRequest
                     .verifyEmailOTP({
@@ -909,12 +998,43 @@ export const useAuthStore = defineStore('Auth', () => {
                     })
                     .catch((err) => {
                         console.error(err);
-                        promptEmailOTP();
+                        handleTwoFactorFailure(err, promptEmailOTP, promptEmailOTP);
                     });
             })
             .catch(() => {
                 twoFactorAuthDialogVisible.value = false;
+                loginForm.value.loading = false;
             });
+    }
+
+    function isHeadlessMode() {
+        return typeof window !== 'undefined' && window.__VRCX_HEADLESS__;
+    }
+
+    function showLoginError(err) {
+        const message = err?.message || t('api.error.message.login_error');
+        toast.error(message);
+    }
+
+    /**
+     * @param {Error} err
+     * @param {Function} retryPrompt
+     * @param {Function} [fallback]
+     */
+    function handleTwoFactorFailure(err, retryPrompt, fallback) {
+        if (isHeadlessMode()) {
+            showLoginError(err);
+            if (
+                String(err?.message || '').includes('Missing Credentials') ||
+                String(err?.message || '').includes('No pending VRChat login')
+            ) {
+                loginForm.value.loading = false;
+                return;
+            }
+            retryPrompt();
+            return;
+        }
+        (fallback || clearCookiesTryLogin)();
     }
 
     /**
@@ -1004,7 +1124,49 @@ export const useAuthStore = defineStore('Auth', () => {
             );
             return;
         }
+        if (isHeadlessMode()) {
+            if (attemptingAutoLogin.value) return;
+            attemptingAutoLogin.value = true;
+            try {
+                const user = await headlessSessionPost(
+                    '/headless/session/recover'
+                );
+                handleCurrentUserUpdate(user);
+            } catch (err) {
+                await syncHeadlessSessionState(err?.payload?.state);
+            } finally {
+                attemptingAutoLogin.value = false;
+            }
+            return;
+        }
         await runHandleAutoLoginFlow();
+    }
+
+    async function syncHeadlessSessionState(state) {
+        if (!isHeadlessMode() || !state) return;
+        if (state.loggedIn) {
+            if (!watchState.isLoggedIn && !loginForm.value.loading) {
+                const user = await headlessSessionGet(
+                    '/headless/session/current-user'
+                );
+                handleCurrentUserUpdate(user);
+            }
+            return;
+        }
+        if (
+            state.authState === 'awaiting_2fa' &&
+            state.pendingTwoFactor?.length &&
+            !loginForm.value.loading
+        ) {
+            loginForm.value.loading = true;
+            handleCurrentUserUpdate({
+                requiresTwoFactorAuth: state.pendingTwoFactor
+            });
+            return;
+        }
+        if (watchState.isLoggedIn && state.authState === 'logged_out') {
+            await runLogoutFlow();
+        }
     }
 
     /**
@@ -1094,6 +1256,7 @@ export const useAuthStore = defineStore('Auth', () => {
         deleteSavedLogin,
         login,
         handleAutoLogin,
+        syncHeadlessSessionState,
         handleLogoutEvent,
         handleCurrentUserUpdate,
         loginComplete,

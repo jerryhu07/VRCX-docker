@@ -96,7 +96,9 @@
                         </label>
 
                         <Field class="mt-4">
-                            <Button type="submit" size="lg" style="width: 100%">{{ t('view.login.login') }}</Button>
+                            <Button type="submit" size="lg" style="width: 100%" :disabled="loginForm.loading">{{
+                                t('view.login.login')
+                            }}</Button>
                         </Field>
                     </form>
                     <Button
@@ -200,6 +202,7 @@
     import { storeToRefs } from 'pinia';
     import { toTypedSchema } from '@vee-validate/zod';
     import { useI18n } from 'vue-i18n';
+    import { toast } from 'vue-sonner';
     import { z } from 'zod';
 
     import {
@@ -277,10 +280,15 @@
     }
 
     const onSubmit = handleSubmit(async (formValues) => {
+        if (loginForm.value.loading) return;
         loginForm.value.username = formValues.username ?? '';
         loginForm.value.password = formValues.password ?? '';
-        await login();
-        await updateSavedCredentials();
+        try {
+            await login();
+            await updateSavedCredentials();
+        } catch (err) {
+            toast.error(err?.message || t('api.error.message.login_error'));
+        }
     });
 
     /**

@@ -170,8 +170,12 @@ export function request(endpoint, options) {
                         parsed.data.error.message === '"Unauthorized"' &&
                         endpoint !== 'auth/user'
                     ) {
-                        // trigger 2FA dialog                }
-                        if (!authStore.twoFactorAuthDialogVisible) {
+                        if (
+                            typeof window !== 'undefined' &&
+                            window.__VRCX_HEADLESS__
+                        ) {
+                            authStore.handleAutoLogin();
+                        } else if (!authStore.twoFactorAuthDialogVisible) {
                             getCurrentUser();
                         }
                         $throw(401, t('api.status_code.401'), endpoint);

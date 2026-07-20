@@ -9,11 +9,14 @@ declare global {
     const LINUX: boolean;
 
     interface Window {
+        __VRCX_HEADLESS__?: boolean;
+        CefSharp?: any;
         $pinia: any;
         $vr: any;
         $debug: AppDebug;
         AppApi: AppApi;
         AppApiVr: AppApiVr;
+        AppApiVrElectron?: AppApiVr;
         WebApi: WebApi;
         VRCXStorage: VRCXStorage;
         SQLite: SQLite;

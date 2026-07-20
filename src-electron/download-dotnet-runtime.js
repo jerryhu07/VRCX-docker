@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const { spawnSync } = require('child_process');
 const { getArchAndPlatform } = require('./utils');
 
@@ -14,27 +13,34 @@ const DOTNET_RUNTIME_DIR = path.join(
 );
 
 async function downloadFile(url, targetPath) {
-    return new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(targetPath);
-        https
-            .get(url, (response) => {
-                if (response.statusCode !== 200) {
-                    reject(
-                        new Error(
-                            `Failed to download, url: ${url} status code: ${response.statusCode}`
-                        )
-                    );
-                    return;
-                }
-                response.pipe(file);
-                file.on('finish', () => {
-                    file.close(resolve);
-                });
-            })
-            .on('error', (err) => {
-                fs.unlink(targetPath, () => reject(err));
-            });
-    });
+    const curl = spawnSync(
+        'curl',
+        [
+            '--fail',
+            '--location',
+            '--retry',
+            '3',
+            '--retry-all-errors',
+            '--retry-delay',
+            '2',
+            '--connect-timeout',
+            '15',
+            '--max-time',
+            '300',
+            '--speed-limit',
+            '1024',
+            '--speed-time',
+            '30',
+            '--output',
+            targetPath,
+            url
+        ],
+        { stdio: 'inherit' }
+    );
+    if (curl.status !== 0) {
+        fs.rmSync(targetPath, { force: true });
+        throw new Error(`curl download failed with status ${curl.status}: ${url}`);
+    }
 }
 
 async function extractTarGz(tarGzPath, extractDir) {
@@ -62,7 +68,7 @@ async function downloadDotnetRuntime(arch, platform) {
         throw new Error('Architecture and platform must be specified');
     }
 
-    let dotnetPlatform = '';
+    let dotnetPlatform;
     if (platform === 'linux') {
         dotnetPlatform = 'linux';
     } else if (platform === 'darwin') {
