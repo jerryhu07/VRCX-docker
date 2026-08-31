@@ -1,7 +1,195 @@
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 
-const { CookieJar, HeadlessSession } = require('./server');
+const {
+    buildJsonDiff,
+    buildMutualNetworkDiff,
+    canonicalizeJson,
+    canonicalizeWatchSnapshot,
+    countMutualNetworkEdges,
+    CookieJar,
+    HeadlessSession,
+    normalizeMutualNetworkSnapshot,
+    normalizeWatchInterval,
+    validateWatchUserId
+} = require('./server');
+
+test('mutual network snapshots normalize edges and record additions and removals', () => {
+    const alice = 'usr_11111111-1111-1111-1111-111111111111';
+    const bob = 'usr_22222222-2222-2222-2222-222222222222';
+    const carol = 'usr_33333333-3333-3333-3333-333333333333';
+    const before = { [alice]: [carol, bob, bob], [bob]: [alice] };
+    const after = { [alice]: [carol], [carol]: [alice] };
+
+    assert.deepEqual(normalizeMutualNetworkSnapshot(before), {
+        [alice]: [bob, carol],
+        [bob]: [alice]
+    });
+    assert.deepEqual(buildMutualNetworkDiff(before, after), {
+        addedFriends: [carol],
+        removedFriends: [bob],
+        addedEdges: [{ friendId: carol, mutualId: alice }],
+        removedEdges: [
+            { friendId: alice, mutualId: bob },
+            { friendId: bob, mutualId: alice }
+        ]
+    });
+    assert.equal(countMutualNetworkEdges(before), 4);
+});
+
+test('mutual network diffs retain the hidden friend placeholder', () => {
+    const alice = 'usr_11111111-1111-1111-1111-111111111111';
+    const hidden = 'usr_00000000-0000-0000-0000-000000000000';
+    const snapshot = { [alice]: [hidden] };
+
+    assert.deepEqual(normalizeMutualNetworkSnapshot(snapshot), snapshot);
+    assert.deepEqual(buildMutualNetworkDiff({ [alice]: [] }, snapshot), {
+        addedFriends: [],
+        removedFriends: [],
+        addedEdges: [{ friendId: alice, mutualId: hidden }],
+        removedEdges: []
+    });
+    assert.equal(countMutualNetworkEdges(snapshot), 1);
+});
+
+test('watch list JSON diffs retain field-level additions, removals, and replacements', () => {
+    const previous = { bio: 'old', displayName: 'Alice', tags: ['a', 'b'] };
+    const next = {
+        bio: 'new',
+        displayName: 'Alice',
+        status: 'active',
+        tags: ['a']
+    };
+
+    assert.deepEqual(buildJsonDiff(previous, next), [
+        { op: 'replace', path: '$.bio', before: 'old', after: 'new' },
+        { op: 'remove', path: '$.tags[1]', before: 'b' },
+        { op: 'add', path: '$.status', after: 'active' }
+    ]);
+});
+
+test('watch list canonicalization stabilizes object keys and interval limits', () => {
+    assert.deepEqual(canonicalizeJson({ z: 1, a: { y: 2, b: 3 } }), {
+        a: { b: 3, y: 2 },
+        z: 1
+    });
+    assert.equal(normalizeWatchInterval(1000), 60 * 60 * 1000);
+    assert.equal(
+        normalizeWatchInterval(8 * 60 * 60 * 1000),
+        8 * 60 * 60 * 1000
+    );
+    assert.throws(
+        () => validateWatchUserId('not-a-user'),
+        /valid VRChat user ID/
+    );
+    assert.equal(
+        validateWatchUserId('usr_12345678-1234-1234-1234-123456789abc'),
+        'usr_12345678-1234-1234-1234-123456789abc'
+    );
+});
+
+test('watch list profile snapshots keep avatarName as the final JSON field', () => {
+    const snapshot = canonicalizeWatchSnapshot(
+        { z: 1, avatarName: 'Kipfel', a: 2 },
+        'profile'
+    );
+
+    assert.deepEqual(snapshot, { a: 2, z: 1, avatarName: 'Kipfel' });
+    assert.equal(Object.keys(snapshot).at(-1), 'avatarName');
+    assert.equal(
+        JSON.stringify(snapshot),
+        '{"a":2,"z":1,"avatarName":"Kipfel"}'
+    );
+});
+
+test('watch list profile fetch appends the parsed avatar name', async () => {
+    const session = createSession();
+    const profile = {
+        id: 'usr_12345678-1234-1234-1234-123456789abc',
+        displayName: 'Alice',
+        currentAvatarImageUrl:
+            'https://api.vrchat.cloud/api/1/file/file_avatar-image/1/file'
+    };
+    session.vrchatRequest = async (endpoint) => {
+        if (endpoint.startsWith('users/')) return profile;
+        assert.equal(endpoint, 'file/file_avatar-image');
+        return { name: 'Avatar - Kipfel - Image - 2026' };
+    };
+
+    const snapshot = await session.fetchWatchProfile(profile.id);
+
+    assert.equal(snapshot.avatarName, 'Kipfel');
+    assert.equal(Object.keys(snapshot).at(-1), 'avatarName');
+});
+
+test('watch list mutual fetch paginates and sorts snapshots by user ID', async () => {
+    const session = createSession();
+    const calls = [];
+    session.vrchatRequest = async (_endpoint, options) => {
+        calls.push(options.params.offset);
+        if (options.params.offset === 0) {
+            return Array.from({ length: 100 }, (_, index) => ({
+                id: `usr_${String(100 - index).padStart(36, '0')}`
+            }));
+        }
+        return [{ id: `usr_${'0'.repeat(36)}`, displayName: 'First' }];
+    };
+
+    const mutuals = await session.fetchWatchMutualFriends(
+        'usr_12345678-1234-1234-1234-123456789abc'
+    );
+
+    assert.deepEqual(calls, [0, 100]);
+    assert.equal(mutuals.length, 101);
+    assert.equal(mutuals[0].displayName, 'First');
+});
+
+test('watch list treats SQLite null placeholders as missing snapshots', async () => {
+    const session = createSession();
+    let insertedArgs;
+    session.sqliteNonQuery = async (_sql, args) => {
+        insertedArgs = args;
+    };
+
+    assert.equal(
+        await session.recordWatchSnapshot(
+            'usr_owner',
+            'usr_target',
+            'mutuals',
+            {},
+            []
+        ),
+        true
+    );
+    assert.equal(insertedArgs['@kind'], 'baseline');
+    assert.deepEqual(JSON.parse(insertedArgs['@diff_json']), [
+        { op: 'add', path: '$', after: [] }
+    ]);
+});
+
+test('a successful empty mutual response is recorded as a full edge removal', async () => {
+    const session = createSession();
+    const friendId = 'usr_11111111-1111-1111-1111-111111111111';
+    const mutualId = 'usr_22222222-2222-2222-2222-222222222222';
+    session.loggedIn = true;
+    session.currentUser = { id: 'usr_owner' };
+    session.friends.set(friendId, { id: friendId });
+    session.latestMutualNetworkSnapshot = async () => ({
+        snapshot: { [friendId]: [mutualId] }
+    });
+    session.fetchWatchMutualFriends = async () => [];
+    let persisted;
+    session.persistMutualNetworkSnapshot = async (snapshot, options) => {
+        persisted = { snapshot, options };
+        return snapshot;
+    };
+
+    await session.fetchMutualNetwork();
+
+    assert.deepEqual(persisted.snapshot, { [friendId]: [] });
+    assert.deepEqual(persisted.options.failures, []);
+});
 
 function createSession() {
     const session = new HeadlessSession({});
@@ -58,7 +246,10 @@ test('a rejected 2FA code preserves the pending login context for retry', async 
         throw error;
     };
 
-    await assert.rejects(session.verifyTwoFactor('totp', '123456'), /Invalid code/);
+    await assert.rejects(
+        session.verifyTwoFactor('totp', '123456'),
+        /Invalid code/
+    );
 
     assert.equal(session.authState, 'awaiting_2fa');
     assert.equal(session.pendingLoginParams.password, 'secret');
@@ -107,7 +298,10 @@ test('password recovery preserves the trusted 2FA cookie while clearing stale au
     };
     session.vrchatRequest = async (endpoint) => {
         if (endpoint === 'config') return {};
-        assert.equal(session.cookieJar.headerFor(url), 'twoFactorAuth=trusted-device');
+        assert.equal(
+            session.cookieJar.headerFor(url),
+            'twoFactorAuth=trusted-device'
+        );
         return { id: 'usr_me', displayName: 'Tester' };
     };
 
@@ -118,7 +312,10 @@ test('password recovery preserves the trusted 2FA cookie while clearing stale au
 test('an authentication 401 cannot delete the trusted 2FA cookie', async () => {
     const session = createSession();
     const url = 'https://api.vrchat.cloud/api/1/auth/user';
-    session.cookieJar.storeCookie(url, 'auth=stale-auth; Path=/; Secure; HttpOnly');
+    session.cookieJar.storeCookie(
+        url,
+        'auth=stale-auth; Path=/; Secure; HttpOnly'
+    );
     session.cookieJar.storeCookie(
         url,
         'twoFactorAuth=trusted-device; Path=/; Secure; HttpOnly'
@@ -132,14 +329,17 @@ test('an authentication 401 cannot delete the trusted 2FA cookie', async () => {
     };
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
-        new Response(JSON.stringify({ error: { message: 'Missing Credentials' } }), {
-            status: 401,
-            headers: {
-                'content-type': 'application/json',
-                'set-cookie':
-                    'auth=; Path=/; Max-Age=0, twoFactorAuth=; Path=/; Max-Age=0'
+        new Response(
+            JSON.stringify({ error: { message: 'Missing Credentials' } }),
+            {
+                status: 401,
+                headers: {
+                    'content-type': 'application/json',
+                    'set-cookie':
+                        'auth=; Path=/; Max-Age=0, twoFactorAuth=; Path=/; Max-Age=0'
+                }
             }
-        });
+        );
 
     try {
         await session.webApiExecute({ url, method: 'GET' });
@@ -148,7 +348,10 @@ test('an authentication 401 cannot delete the trusted 2FA cookie', async () => {
     }
 
     assert.equal(session.authState, 'recovering');
-    assert.match(session.cookieJar.headerFor(url), /twoFactorAuth=trusted-device/);
+    assert.match(
+        session.cookieJar.headerFor(url),
+        /twoFactorAuth=trusted-device/
+    );
 });
 
 test('restoring saved cookies merges them with the active trusted session', async () => {
@@ -206,7 +409,10 @@ test('recovery mints a new auth session with saved credentials and trusted 2FA',
             cookieRestoreAttempts++;
             throw new Error('Missing Credentials');
         }
-        assert.equal(session.cookieJar.headerFor(url), 'twoFactorAuth=trusted-device');
+        assert.equal(
+            session.cookieJar.headerFor(url),
+            'twoFactorAuth=trusted-device'
+        );
         return { id: 'usr_me', displayName: 'Tester' };
     };
 
@@ -271,4 +477,71 @@ test('network failure keeps authentication recoverable for a later retry', async
     assert.equal(await session.trySavedPasswordLogin(saved), false);
     assert.equal(session.authState, 'recovering');
     assert.match(session.authStateReason, /network unavailable/i);
+});
+
+test('concurrent recovery creates only one Pipeline socket', async () => {
+    const session = createSession();
+    session.loggedIn = true;
+    session.authState = 'authenticated';
+    let releaseAuth;
+    session.vrchatRequest = async () =>
+        await new Promise((resolve) => {
+            releaseAuth = () => resolve({ ok: true, token: 'pipeline-token' });
+        });
+    const sockets = [];
+    session.createPipelineSocket = () => {
+        const socket = new EventEmitter();
+        socket.close = () => {};
+        socket.terminate = () => {};
+        sockets.push(socket);
+        return socket;
+    };
+
+    const first = session.connectPipeline();
+    const second = session.connectPipeline();
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseAuth();
+    await Promise.all([first, second]);
+
+    assert.equal(sockets.length, 1);
+    assert.equal(session.pipelineSocket, sockets[0]);
+});
+
+test('a stale Pipeline close cannot mark the active socket disconnected', async () => {
+    const session = createSession();
+    session.loggedIn = true;
+    session.authState = 'authenticated';
+    session.vrchatRequest = async () => ({ ok: true, token: 'pipeline-token' });
+    const staleSocket = new EventEmitter();
+    staleSocket.close = () => {};
+    staleSocket.terminate = () => {};
+    session.createPipelineSocket = () => staleSocket;
+    await session.connectPipeline();
+
+    const activeSocket = new EventEmitter();
+    session.pipelineSocket = activeSocket;
+    session.websocketConnected = true;
+    staleSocket.emit('close', 1006, Buffer.alloc(0));
+
+    assert.equal(session.pipelineSocket, activeSocket);
+    assert.equal(session.websocketConnected, true);
+});
+
+test('Pipeline string content is retained when it is not JSON', async () => {
+    const session = createSession();
+    let persisted;
+    session.persistPipelineEvent = async (event) => {
+        persisted = event;
+    };
+    session.applyPipelineEvent = async () => false;
+    session.augmentPipelineEvent = () => {};
+
+    await session.handlePipelineMessage(
+        JSON.stringify({
+            type: 'notification-v2-delete',
+            content: 'not_example'
+        })
+    );
+
+    assert.equal(persisted.content, 'not_example');
 });

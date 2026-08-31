@@ -47,6 +47,7 @@
     "nav_tooltip": {
         "friends_locations": "Friends Locations",
         "feed": "Feed",
+        "watch_list": "Watch List",
         "game_log": "Game Log",
         "player_list": "Player List",
         "search": "Search",
@@ -223,6 +224,25 @@
         }
     },
     "view": {
+        "watch_list": {
+            "header": "Watch List",
+            "summary": "{users} watched users · {changes} recorded snapshots",
+            "user_id": "VRChat user ID (usr_...)",
+            "interval": "Polling interval",
+            "add": "Add",
+            "search": "Search watched users",
+            "all_changes": "All changes",
+            "enabled": "Polling enabled",
+            "poll_now": "Poll now",
+            "mutual_friends": "Mutual friends",
+            "profile": "Profile",
+            "baseline": "Baseline",
+            "raw_snapshot": "Raw JSON snapshot",
+            "never": "Never",
+            "just_now": "Just now",
+            "remove_title": "Remove watched user",
+            "remove_description": "Remove {name} and all recorded changes?"
+        },
         "login": {
             "savedAccounts": "Saved Accounts",
             "login": "Login",
@@ -568,6 +588,15 @@
                     "mutual_friend_graph_ready_title": "Mutual Friend Network Graph",
                     "mutual_friend_graph_ready_message": "Mutual friend network graph is ready",
                     "friend_list_changed_fetch_again": "Friend list changed. Please fetch the mutual friend network again."
+                },
+                "history": {
+                    "title": "Network snapshot history",
+                    "snapshot": "Network snapshot",
+                    "summary": "{friends} friends · {edges} relationships",
+                    "friends": "friends",
+                    "edges": "relationships",
+                    "details": "View diff details",
+                    "restore_error": "Failed to restore the selected network snapshot"
                 },
                 "settings": {
                     "title": "Graph Layout Settings",

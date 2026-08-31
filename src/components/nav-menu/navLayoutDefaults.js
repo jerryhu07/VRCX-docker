@@ -3,6 +3,7 @@ import { DASHBOARD_NAV_KEY_PREFIX } from '../../shared/constants';
 export function createBaseDefaultNavLayout(t) {
     return [
         { type: 'item', key: 'feed' },
+        { type: 'item', key: 'watch-list' },
         { type: 'item', key: 'friends-locations' },
         { type: 'item', key: 'game-log' },
         { type: 'item', key: 'player-list' },

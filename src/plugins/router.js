@@ -22,6 +22,7 @@ import ScreenshotMetadata from './../views/Tools/ScreenshotMetadata.vue';
 import Search from './../views/Search/Search.vue';
 import Settings from './../views/Settings/Settings.vue';
 import Tools from './../views/Tools/Tools.vue';
+import WatchList from './../views/WatchList/WatchList.vue';
 
 const routes = [
     {
@@ -37,6 +38,7 @@ const routes = [
         children: [
             { path: '', redirect: { name: 'feed' } },
             { path: 'feed', name: 'feed', component: Feed },
+            { path: 'watch-list', name: 'watch-list', component: WatchList },
             {
                 path: 'friends-locations',
                 name: 'friends-locations',

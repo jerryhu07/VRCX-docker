@@ -52,7 +52,11 @@ export async function runInitFriendsListFlow(t) {
     } catch (err) {
         if (!AppDebug.dontLogMeOut) {
             toast.error(t('message.friend.load_failed'));
-            authStore.handleLogoutEvent();
+            const isHeadless =
+                typeof window !== 'undefined' && window.__VRCX_HEADLESS__;
+            if (!isHeadless) {
+                authStore.handleLogoutEvent();
+            }
             throw err;
         }
     }

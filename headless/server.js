@@ -25,6 +25,14 @@ const authValidationIntervalMs =
     configuredAuthValidationIntervalMs > 0
         ? Math.max(60000, configuredAuthValidationIntervalMs)
         : 420000;
+const defaultWatchIntervalMs = 8 * 60 * 60 * 1000;
+const minWatchIntervalMs = 60 * 60 * 1000;
+const maxWatchIntervalMs = 30 * 24 * 60 * 60 * 1000;
+const watchSchedulerIntervalMs = 60 * 1000;
+const watchRetryIntervalMs = 15 * 60 * 1000;
+const mutualNetworkIntervalMs = 24 * 60 * 60 * 1000;
+const mutualNetworkSchedulerIntervalMs = 5 * 60 * 1000;
+const mutualNetworkRequestDelayMs = 220;
 
 const defaultEndpoint = 'https://api.vrchat.cloud/api/1';
 const defaultPipeline = 'wss://pipeline.vrchat.cloud';
@@ -68,7 +76,9 @@ class DotNetBridge {
                 ? armBridgePath
                 : path.join(rootDir, 'build', 'Electron', 'VRCX-Electron.cjs');
         require(bridgePath);
-        const InteropApi = require(path.join(rootDir, 'src-electron', 'InteropApi'));
+        const InteropApi = require(
+            path.join(rootDir, 'src-electron', 'InteropApi')
+        );
         this.interop = new InteropApi();
     }
 
@@ -136,7 +146,153 @@ function safeError(err) {
     };
 }
 
-function buildRequestInit(endpoint, options = {}, endpointDomain = defaultEndpoint) {
+function canonicalizeJson(value) {
+    if (Array.isArray(value)) return value.map(canonicalizeJson);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(
+        Object.keys(value)
+            .sort()
+            .map((key) => [key, canonicalizeJson(value[key])])
+    );
+}
+
+function canonicalizeWatchSnapshot(snapshot, source = '') {
+    const normalized = canonicalizeJson(snapshot);
+    if (
+        source !== 'profile' ||
+        !normalized ||
+        typeof normalized !== 'object' ||
+        Array.isArray(normalized) ||
+        !Object.prototype.hasOwnProperty.call(normalized, 'avatarName')
+    ) {
+        return normalized;
+    }
+    const { avatarName, ...profile } = normalized;
+    return { ...profile, avatarName };
+}
+
+function buildJsonDiff(previous, next, path = '$', changes = []) {
+    if (Object.is(previous, next)) return changes;
+    const previousIsObject = previous && typeof previous === 'object';
+    const nextIsObject = next && typeof next === 'object';
+    if (
+        !previousIsObject ||
+        !nextIsObject ||
+        Array.isArray(previous) !== Array.isArray(next)
+    ) {
+        changes.push({ op: 'replace', path, before: previous, after: next });
+        return changes;
+    }
+
+    const previousKeys = Array.isArray(previous)
+        ? Array.from({ length: previous.length }, (_, index) => String(index))
+        : Object.keys(previous);
+    const nextKeys = Array.isArray(next)
+        ? Array.from({ length: next.length }, (_, index) => String(index))
+        : Object.keys(next);
+    const keys = new Set([...previousKeys, ...nextKeys]);
+    for (const key of keys) {
+        const childPath =
+            Array.isArray(next) || Array.isArray(previous)
+                ? `${path}[${key}]`
+                : `${path}.${key}`;
+        if (!Object.prototype.hasOwnProperty.call(previous, key)) {
+            changes.push({ op: 'add', path: childPath, after: next[key] });
+        } else if (!Object.prototype.hasOwnProperty.call(next, key)) {
+            changes.push({
+                op: 'remove',
+                path: childPath,
+                before: previous[key]
+            });
+        } else {
+            buildJsonDiff(previous[key], next[key], childPath, changes);
+        }
+    }
+    return changes;
+}
+
+function normalizeMutualNetworkSnapshot(snapshot) {
+    const normalized = {};
+    for (const [friendId, mutualIds] of Object.entries(snapshot || {}).sort(
+        ([left], [right]) => left.localeCompare(right)
+    )) {
+        if (!/^usr_[0-9a-fA-F-]{36}$/.test(friendId)) continue;
+        normalized[friendId] = [
+            ...new Set(
+                (Array.isArray(mutualIds) ? mutualIds : [])
+                    .map((id) => String(id || ''))
+                    .filter((id) => /^usr_[0-9a-fA-F-]{36}$/.test(id))
+            )
+        ].sort();
+    }
+    return normalized;
+}
+
+function buildMutualNetworkDiff(previous, next) {
+    const before = normalizeMutualNetworkSnapshot(previous);
+    const after = normalizeMutualNetworkSnapshot(next);
+    const beforeFriends = new Set(Object.keys(before));
+    const afterFriends = new Set(Object.keys(after));
+    const addedFriends = [...afterFriends]
+        .filter((id) => !beforeFriends.has(id))
+        .sort();
+    const removedFriends = [...beforeFriends]
+        .filter((id) => !afterFriends.has(id))
+        .sort();
+    const addedEdges = [];
+    const removedEdges = [];
+    for (const friendId of new Set([...beforeFriends, ...afterFriends])) {
+        const beforeEdges = new Set(before[friendId] || []);
+        const afterEdges = new Set(after[friendId] || []);
+        for (const mutualId of afterEdges) {
+            if (!beforeEdges.has(mutualId))
+                addedEdges.push({ friendId, mutualId });
+        }
+        for (const mutualId of beforeEdges) {
+            if (!afterEdges.has(mutualId))
+                removedEdges.push({ friendId, mutualId });
+        }
+    }
+    const sortEdges = (left, right) =>
+        left.friendId.localeCompare(right.friendId) ||
+        left.mutualId.localeCompare(right.mutualId);
+    addedEdges.sort(sortEdges);
+    removedEdges.sort(sortEdges);
+    return { addedFriends, removedFriends, addedEdges, removedEdges };
+}
+
+function countMutualNetworkEdges(snapshot) {
+    return Object.values(snapshot || {}).reduce(
+        (total, mutualIds) =>
+            total + (Array.isArray(mutualIds) ? mutualIds.length : 0),
+        0
+    );
+}
+
+function normalizeWatchInterval(value) {
+    const interval = Number(value || defaultWatchIntervalMs);
+    if (!Number.isFinite(interval)) return defaultWatchIntervalMs;
+    return Math.min(
+        maxWatchIntervalMs,
+        Math.max(minWatchIntervalMs, Math.round(interval))
+    );
+}
+
+function validateWatchUserId(value) {
+    const userId = String(value || '').trim();
+    if (!/^usr_[0-9a-fA-F-]{36}$/.test(userId)) {
+        const err = new Error('A valid VRChat user ID is required.');
+        err.status = 400;
+        throw err;
+    }
+    return userId;
+}
+
+function buildRequestInit(
+    endpoint,
+    options = {},
+    endpointDomain = defaultEndpoint
+) {
     const init = {
         url: `${endpointDomain}/${endpoint}`,
         method: 'GET',
@@ -237,7 +393,9 @@ function splitSetCookieHeader(header) {
 }
 
 function userPrefix(userId) {
-    let prefix = String(userId || '').replaceAll('-', '').replaceAll('_', '');
+    let prefix = String(userId || '')
+        .replaceAll('-', '')
+        .replaceAll('_', '');
     if (/^\d/.test(prefix)) prefix = `_${prefix}`;
     return prefix;
 }
@@ -355,7 +513,9 @@ class CookieJar {
 
     exportBase64() {
         this.removeExpired();
-        return Buffer.from(JSON.stringify(this.cookies), 'utf8').toString('base64');
+        return Buffer.from(JSON.stringify(this.cookies), 'utf8').toString(
+            'base64'
+        );
     }
 
     removeExpired() {
@@ -486,7 +646,8 @@ class HeadlessSession {
     constructor(dotnetBridge) {
         this.bridge = dotnetBridge;
         this.endpointDomain = process.env.VRCX_API_ENDPOINT || defaultEndpoint;
-        this.websocketDomain = process.env.VRCX_PIPELINE_ENDPOINT || defaultPipeline;
+        this.websocketDomain =
+            process.env.VRCX_PIPELINE_ENDPOINT || defaultPipeline;
         this.currentUser = null;
         this.loggedIn = false;
         this.authState = 'logged_out';
@@ -498,8 +659,10 @@ class HeadlessSession {
         this.websocketMessageCount = 0;
         this.lastPipelineMessage = '';
         this.pipelineSocket = null;
+        this.pipelineConnectInFlight = false;
         this.reconnectTimer = null;
         this.pipelineHeartbeatTimer = null;
+        this.pipelineHeartbeatSocket = null;
         this.pipelineRecoveryTimer = null;
         this.authRecoveryTimer = null;
         this.authRecoveryInFlight = false;
@@ -509,6 +672,11 @@ class HeadlessSession {
         this.autoRecoveryDisabled = false;
         this.friendRefreshTimer = null;
         this.friendRefreshInFlight = false;
+        this.watchListTimer = null;
+        this.watchListPollInFlight = false;
+        this.watchUserPolls = new Map();
+        this.mutualNetworkTimer = null;
+        this.mutualNetworkFetchInFlight = false;
         this.clients = new Set();
         this.friends = new Map();
         this.logStreamClients = new Map();
@@ -571,18 +739,20 @@ class HeadlessSession {
             friendCacheSize: this.friends.size,
             logStream: {
                 tokenConfigured: !!this.logStreamToken,
-                clients: Array.from(this.logStreamClients.values()).map((client) => ({
-                    machineId: client.machineId,
-                    connected: !!client.connected,
-                    lastSeenAt: client.lastSeenAt || '',
-                    lastEventAt: client.lastEventAt || '',
-                    currentFile: client.currentFile || '',
-                    fileOffset: client.fileOffset || 0,
-                    acceptedCount: client.acceptedCount || 0,
-                    duplicateCount: client.duplicateCount || 0,
-                    failedCount: client.failedCount || 0,
-                    lastError: client.lastError || ''
-                }))
+                clients: Array.from(this.logStreamClients.values()).map(
+                    (client) => ({
+                        machineId: client.machineId,
+                        connected: !!client.connected,
+                        lastSeenAt: client.lastSeenAt || '',
+                        lastEventAt: client.lastEventAt || '',
+                        currentFile: client.currentFile || '',
+                        fileOffset: client.fileOffset || 0,
+                        acceptedCount: client.acceptedCount || 0,
+                        duplicateCount: client.duplicateCount || 0,
+                        failedCount: client.failedCount || 0,
+                        lastError: client.lastError || ''
+                    })
+                )
             }
         };
     }
@@ -611,7 +781,10 @@ class HeadlessSession {
     }
 
     async storageSet(key, value) {
-        return await this.call('VRCXStorage', 'Set', [key, String(value ?? '')]);
+        return await this.call('VRCXStorage', 'Set', [
+            key,
+            String(value ?? '')
+        ]);
     }
 
     isTwoFactorCookie(cookie) {
@@ -703,6 +876,8 @@ class HeadlessSession {
     stopAuthenticatedServices() {
         this.loggedIn = false;
         this.stopFriendRefreshLoop();
+        this.stopWatchListLoop();
+        this.stopMutualNetworkLoop();
         this.closePipeline();
     }
 
@@ -726,7 +901,9 @@ class HeadlessSession {
         try {
             const pending = JSON.parse(raw);
             if (!pending?.loginParams) return false;
-            this.pendingLoginParams = this.buildLoginParams(pending.loginParams);
+            this.pendingLoginParams = this.buildLoginParams(
+                pending.loginParams
+            );
             this.pendingTwoFactor = Array.isArray(pending.pendingTwoFactor)
                 ? pending.pendingTwoFactor
                 : [];
@@ -752,7 +929,10 @@ class HeadlessSession {
     }
 
     async markAuthenticationLost(reason) {
-        if (this.authState === 'awaiting_2fa' || this.authState === 'authenticating') {
+        if (
+            this.authState === 'awaiting_2fa' ||
+            this.authState === 'authenticating'
+        ) {
             return;
         }
         this.stopAuthenticatedServices();
@@ -761,7 +941,10 @@ class HeadlessSession {
         this.broadcast({ type: 'state', state: this.state() });
         setTimeout(() => {
             this.ensureAuthenticated().catch((err) => {
-                console.warn('Immediate auth recovery failed:', err.message || err);
+                console.warn(
+                    'Immediate auth recovery failed:',
+                    err.message || err
+                );
             });
         }, 0).unref?.();
     }
@@ -781,7 +964,8 @@ class HeadlessSession {
 
         if (options.uploadFilePUT) {
             init.body = Buffer.from(String(options.fileData || ''), 'base64');
-            init.headers['Content-Type'] = options.fileMIME || 'application/octet-stream';
+            init.headers['Content-Type'] =
+                options.fileMIME || 'application/octet-stream';
             if (options.fileMD5) init.headers['Content-MD5'] = options.fileMD5;
         } else if (
             options.uploadImage ||
@@ -794,9 +978,17 @@ class HeadlessSession {
                 formData.append('data', String(options.postData || ''));
                 formData.append(
                     'image',
-                    new Blob([Buffer.from(String(options.imageData || ''), 'base64')], {
-                        type: 'image/png'
-                    }),
+                    new Blob(
+                        [
+                            Buffer.from(
+                                String(options.imageData || ''),
+                                'base64'
+                            )
+                        ],
+                        {
+                            type: 'image/png'
+                        }
+                    ),
                     'image.png'
                 );
             } else if (options.uploadImagePrint) {
@@ -805,9 +997,17 @@ class HeadlessSession {
                 }
                 formData.append(
                     'image',
-                    new Blob([Buffer.from(String(options.imageData || ''), 'base64')], {
-                        type: 'image/png'
-                    }),
+                    new Blob(
+                        [
+                            Buffer.from(
+                                String(options.imageData || ''),
+                                'base64'
+                            )
+                        ],
+                        {
+                            type: 'image/png'
+                        }
+                    ),
                     'image'
                 );
             } else {
@@ -816,9 +1016,17 @@ class HeadlessSession {
                 }
                 formData.append(
                     'file',
-                    new Blob([Buffer.from(String(options.imageData || ''), 'base64')], {
-                        type: 'image/png'
-                    }),
+                    new Blob(
+                        [
+                            Buffer.from(
+                                String(options.imageData || ''),
+                                'base64'
+                            )
+                        ],
+                        {
+                            type: 'image/png'
+                        }
+                    ),
                     'blob'
                 );
             }
@@ -869,7 +1077,9 @@ class HeadlessSession {
         }
 
         if (authenticationFailed) {
-            await this.markAuthenticationLost('VRChat rejected the active session');
+            await this.markAuthenticationLost(
+                'VRChat rejected the active session'
+            );
         }
 
         if (response.status === 200 && !data.startsWith('data:')) {
@@ -887,7 +1097,10 @@ class HeadlessSession {
         const message = String(
             parsed?.error?.message || parsed?.message || data || ''
         ).toLowerCase();
-        return message.includes('missing credentials') || message.includes('unauthorized');
+        return (
+            message.includes('missing credentials') ||
+            message.includes('unauthorized')
+        );
     }
 
     async vrchatRequest(endpoint, options = {}) {
@@ -897,7 +1110,10 @@ class HeadlessSession {
         const data = parseMaybeJson(result.data);
         if (result.status < 200 || result.status >= 300) {
             const err = new Error(
-                data?.error?.message || data?.message || result.data || 'VRChat API error'
+                data?.error?.message ||
+                    data?.message ||
+                    result.data ||
+                    'VRChat API error'
             );
             err.status = result.status;
             err.data = data;
@@ -961,10 +1177,37 @@ class HeadlessSession {
         await this.sqliteNonQuery(
             'CREATE TABLE IF NOT EXISTS headless_log_stream_clients (machine_id TEXT PRIMARY KEY, last_seen_at TEXT, last_event_at TEXT, current_file TEXT, file_offset INTEGER, connected INTEGER, accepted_count INTEGER, duplicate_count INTEGER, failed_count INTEGER, last_error TEXT)'
         );
+        await this.sqliteNonQuery(
+            'CREATE TABLE IF NOT EXISTS headless_watch_users (owner_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, interval_ms INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_polled_at TEXT, last_attempt_at TEXT, last_error TEXT, display_name TEXT, profile_json TEXT, mutuals_json TEXT, PRIMARY KEY(owner_id, user_id))'
+        );
+        await this.sqliteNonQuery(
+            'CREATE TABLE IF NOT EXISTS headless_watch_changes (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, diff_json TEXT NOT NULL, snapshot_json TEXT NOT NULL)'
+        );
+        await this.sqliteNonQuery(
+            'CREATE INDEX IF NOT EXISTS headless_watch_changes_owner_created_idx ON headless_watch_changes (owner_id, created_at DESC)'
+        );
+        await this.sqliteNonQuery(
+            'CREATE INDEX IF NOT EXISTS headless_watch_changes_owner_user_created_idx ON headless_watch_changes (owner_id, user_id, created_at DESC)'
+        );
+        await this.sqliteNonQuery(
+            'CREATE TABLE IF NOT EXISTS headless_mutual_network_snapshots (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, created_at TEXT NOT NULL, source TEXT NOT NULL, friend_count INTEGER NOT NULL, edge_count INTEGER NOT NULL, failed_count INTEGER NOT NULL DEFAULT 0, failures_json TEXT NOT NULL, diff_json TEXT NOT NULL, snapshot_json TEXT NOT NULL)'
+        );
+        await this.sqliteNonQuery(
+            'CREATE INDEX IF NOT EXISTS headless_mutual_network_owner_created_idx ON headless_mutual_network_snapshots (owner_id, created_at DESC)'
+        );
     }
 
     async initUserTables(userId) {
         const prefix = userPrefix(userId);
+        await this.sqliteNonQuery(
+            `CREATE TABLE IF NOT EXISTS ${prefix}_mutual_graph_friends (friend_id TEXT PRIMARY KEY)`
+        );
+        await this.sqliteNonQuery(
+            `CREATE TABLE IF NOT EXISTS ${prefix}_mutual_graph_links (friend_id TEXT NOT NULL, mutual_id TEXT NOT NULL, PRIMARY KEY(friend_id, mutual_id))`
+        );
+        await this.sqliteNonQuery(
+            `CREATE TABLE IF NOT EXISTS ${prefix}_mutual_graph_meta (friend_id TEXT PRIMARY KEY, last_fetched_at TEXT, opted_out INTEGER DEFAULT 0)`
+        );
         await this.sqliteNonQuery(
             `CREATE TABLE IF NOT EXISTS ${prefix}_feed_gps (id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT, display_name TEXT, location TEXT, world_name TEXT, previous_location TEXT, time INTEGER, group_name TEXT)`
         );
@@ -1006,7 +1249,8 @@ class HeadlessSession {
         const saved = savedCredentials[lastUserLoggedIn];
         if (saved?.loginParams?.endpoint) {
             this.endpointDomain = saved.loginParams.endpoint;
-            this.websocketDomain = saved.loginParams.websocket || defaultPipeline;
+            this.websocketDomain =
+                saved.loginParams.websocket || defaultPipeline;
         }
     }
 
@@ -1037,7 +1281,9 @@ class HeadlessSession {
         let candidate = candidates.length === 1 ? candidates[0] : null;
         if (!candidate && candidates.length > 1) {
             const dated = candidates
-                .filter(([, saved]) => Number.isFinite(Date.parse(saved.updatedAt)))
+                .filter(([, saved]) =>
+                    Number.isFinite(Date.parse(saved.updatedAt))
+                )
                 .sort(
                     ([, a], [, b]) =>
                         Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
@@ -1070,7 +1316,10 @@ class HeadlessSession {
             cookies,
             updatedAt: new Date().toJSON()
         };
-        await this.configSet('savedCredentials', JSON.stringify(savedCredentials));
+        await this.configSet(
+            'savedCredentials',
+            JSON.stringify(savedCredentials)
+        );
         await this.configSet('lastUserLoggedIn', user.id);
         this.autoRecoveryDisabled = false;
         await this.configRemove('headlessAutoRecoveryDisabled');
@@ -1084,7 +1333,10 @@ class HeadlessSession {
         saved.user = this.currentUser;
         saved.cookies = await this.getCookies();
         saved.updatedAt = new Date().toJSON();
-        await this.configSet('savedCredentials', JSON.stringify(savedCredentials));
+        await this.configSet(
+            'savedCredentials',
+            JSON.stringify(savedCredentials)
+        );
     }
 
     buildLoginParams({ username, password, endpoint, websocket }) {
@@ -1131,7 +1383,10 @@ class HeadlessSession {
                 );
             }
         } catch (err) {
-            console.warn('Active VRChat session could not be restored:', err.message || err);
+            console.warn(
+                'Active VRChat session could not be restored:',
+                err.message || err
+            );
         }
 
         try {
@@ -1142,7 +1397,10 @@ class HeadlessSession {
                 );
             }
         } catch (err) {
-            console.warn('Saved VRChat session could not be restored:', err.message || err);
+            console.warn(
+                'Saved VRChat session could not be restored:',
+                err.message || err
+            );
         }
 
         return await this.trySavedPasswordLogin(saved);
@@ -1155,7 +1413,8 @@ class HeadlessSession {
                 saved = recoveryCredential?.saved;
             }
             const primaryPasswordEnabled =
-                (await this.configGet('enablePrimaryPassword', 'false')) === 'true';
+                (await this.configGet('enablePrimaryPassword', 'false')) ===
+                'true';
             if (primaryPasswordEnabled) return false;
             const loginParams = saved?.loginParams;
             if (!loginParams?.username || !loginParams?.password) return false;
@@ -1275,7 +1534,10 @@ class HeadlessSession {
             err.status = 400;
             throw err;
         }
-        if (this.authState !== 'awaiting_2fa' || !this.pendingTwoFactor.length) {
+        if (
+            this.authState !== 'awaiting_2fa' ||
+            !this.pendingTwoFactor.length
+        ) {
             const err = new Error(
                 'No pending VRChat login. Please submit username and password again.'
             );
@@ -1283,7 +1545,9 @@ class HeadlessSession {
             throw err;
         }
         if (!code || !String(code).trim()) {
-            const err = new Error('Two-factor authentication code is required.');
+            const err = new Error(
+                'Two-factor authentication code is required.'
+            );
             err.status = 400;
             throw err;
         }
@@ -1296,17 +1560,24 @@ class HeadlessSession {
             const user = await this.vrchatRequest('auth/user');
             if (user?.requiresTwoFactorAuth) {
                 await this.enterTwoFactor(user, this.pendingLoginParams);
-                const err = new Error('VRChat did not accept the two-factor code.');
+                const err = new Error(
+                    'VRChat did not accept the two-factor code.'
+                );
                 err.status = 401;
                 throw err;
             }
             const loginParams = this.pendingLoginParams;
             await this.completeLogin(user, loginParams);
-            console.log(`VRChat 2FA verified for ${user.displayName || user.id}`);
+            console.log(
+                `VRChat 2FA verified for ${user.displayName || user.id}`
+            );
             return user;
         } catch (err) {
             if (this.authState !== 'authenticated') {
-                this.setAuthState('awaiting_2fa', err.message || '2FA verification failed');
+                this.setAuthState(
+                    'awaiting_2fa',
+                    err.message || '2FA verification failed'
+                );
                 this.broadcast({ type: 'state', state: this.state() });
             }
             throw err;
@@ -1401,7 +1672,10 @@ class HeadlessSession {
                     this.authState === 'recovering' &&
                     !this.authStateReason
                 ) {
-                    this.setAuthState('logged_out', 'No reusable VRChat session');
+                    this.setAuthState(
+                        'logged_out',
+                        'No reusable VRChat session'
+                    );
                 }
                 this.broadcast({ type: 'state', state: this.state() });
                 return restored;
@@ -1420,8 +1694,12 @@ class HeadlessSession {
         }
 
         return await this.runAuthOperation(async () => {
-            if (!this.loggedIn || this.authState !== 'authenticated') return false;
-            if (Date.now() - this.lastAuthValidationAt < authValidationIntervalMs) {
+            if (!this.loggedIn || this.authState !== 'authenticated')
+                return false;
+            if (
+                Date.now() - this.lastAuthValidationAt <
+                authValidationIntervalMs
+            ) {
                 return false;
             }
             try {
@@ -1447,7 +1725,10 @@ class HeadlessSession {
                 // Authentication 401s schedule recovery in webApiExecute. Network
                 // errors leave the current session intact for the next probe.
                 if (this.authState !== 'recovering') {
-                    console.warn('VRChat session validation failed:', err.message || err);
+                    console.warn(
+                        'VRChat session validation failed:',
+                        err.message || err
+                    );
                 }
                 return false;
             }
@@ -1471,16 +1752,26 @@ class HeadlessSession {
         await this.persistPendingLogin();
         this.broadcast({ type: 'state', state: this.state() });
         this.connectPipeline().catch((err) => {
-            console.warn('Initial Pipeline connection failed:', err.message || err);
+            console.warn(
+                'Initial Pipeline connection failed:',
+                err.message || err
+            );
         });
         this.initializeAuthenticatedData(user.id).catch((err) => {
-            console.warn('Post-login initialization failed:', err.message || err);
+            console.warn(
+                'Post-login initialization failed:',
+                err.message || err
+            );
         });
     }
 
     async initializeAuthenticatedData(userId) {
         await this.loadFriendSnapshot();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        this.startWatchListLoop();
+        await this.seedMutualNetworkSnapshotFromCurrent();
+        if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        this.startMutualNetworkLoop();
         await this.backfillSelfInstanceActivityFromLocations();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
         this.startFriendRefreshLoop();
@@ -1492,7 +1783,8 @@ class HeadlessSession {
     async backfillSelfInstanceActivityFromLocations() {
         if (!this.currentUser?.id) return;
         const userId = this.currentUser.id;
-        const displayName = this.currentUser.displayName || this.currentUser.username || userId;
+        const displayName =
+            this.currentUser.displayName || this.currentUser.username || userId;
         const joined = await this.sqliteNonQuery(
             `INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time)
              SELECT gl.created_at, 'OnPlayerJoined', @display_name, gl.location, @user_id, 0
@@ -1547,7 +1839,8 @@ class HeadlessSession {
     stateForUserId(userId, fallback = 'offline') {
         if (this.currentUser?.onlineFriends?.includes(userId)) return 'online';
         if (this.currentUser?.activeFriends?.includes(userId)) return 'active';
-        if (this.currentUser?.offlineFriends?.includes(userId)) return 'offline';
+        if (this.currentUser?.offlineFriends?.includes(userId))
+            return 'offline';
         return fallback;
     }
 
@@ -1584,12 +1877,18 @@ class HeadlessSession {
 
     startFriendRefreshLoop() {
         this.stopFriendRefreshLoop();
-        if (!Number.isFinite(friendRefreshIntervalMs) || friendRefreshIntervalMs <= 0) {
+        if (
+            !Number.isFinite(friendRefreshIntervalMs) ||
+            friendRefreshIntervalMs <= 0
+        ) {
             return;
         }
         this.friendRefreshTimer = setInterval(() => {
             this.refreshFriendSnapshot().catch((err) => {
-                console.warn('Friend snapshot refresh failed:', err.message || err);
+                console.warn(
+                    'Friend snapshot refresh failed:',
+                    err.message || err
+                );
             });
         }, friendRefreshIntervalMs);
         this.friendRefreshTimer.unref?.();
@@ -1613,12 +1912,637 @@ class HeadlessSession {
         }
     }
 
+    startWatchListLoop() {
+        this.stopWatchListLoop();
+        if (!this.loggedIn || !this.currentUser?.id) return;
+        this.pollDueWatchUsers().catch((err) => {
+            console.warn('Initial watch list poll failed:', err.message || err);
+        });
+        this.watchListTimer = setInterval(() => {
+            this.pollDueWatchUsers().catch((err) => {
+                console.warn('Watch list poll failed:', err.message || err);
+            });
+        }, watchSchedulerIntervalMs);
+        this.watchListTimer.unref?.();
+    }
+
+    stopWatchListLoop() {
+        if (this.watchListTimer) {
+            clearInterval(this.watchListTimer);
+            this.watchListTimer = null;
+        }
+    }
+
+    startMutualNetworkLoop() {
+        this.stopMutualNetworkLoop();
+        if (!this.loggedIn || !this.currentUser?.id) return;
+        this.fetchDueMutualNetwork().catch((err) => {
+            console.warn(
+                'Initial mutual network refresh failed:',
+                err.message || err
+            );
+        });
+        this.mutualNetworkTimer = setInterval(() => {
+            this.fetchDueMutualNetwork().catch((err) => {
+                console.warn(
+                    'Mutual network refresh failed:',
+                    err.message || err
+                );
+            });
+        }, mutualNetworkSchedulerIntervalMs);
+        this.mutualNetworkTimer.unref?.();
+    }
+
+    stopMutualNetworkLoop() {
+        if (this.mutualNetworkTimer) {
+            clearInterval(this.mutualNetworkTimer);
+            this.mutualNetworkTimer = null;
+        }
+    }
+
+    async listMutualNetworkSnapshots(limit = 90) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedLimit = Math.min(365, Math.max(1, Number(limit) || 90));
+        const rows = await this.sqliteExecute(
+            `SELECT id, created_at, source, friend_count, edge_count, failed_count,
+                    failures_json, diff_json
+             FROM headless_mutual_network_snapshots
+             WHERE owner_id = @owner_id
+             ORDER BY id DESC
+             LIMIT @limit`,
+            { '@owner_id': ownerId, '@limit': normalizedLimit }
+        );
+        return rows.map((row) => ({
+            id: Number(row[0]),
+            createdAt: row[1],
+            source: row[2],
+            friendCount: Number(row[3]) || 0,
+            edgeCount: Number(row[4]) || 0,
+            failedCount: Number(row[5]) || 0,
+            failures: parseMaybeJson(row[6]) || [],
+            diff: parseMaybeJson(row[7]) || buildMutualNetworkDiff({}, {})
+        }));
+    }
+
+    async getMutualNetworkSnapshot(snapshotId) {
+        const ownerId = this.requireWatchListOwner();
+        const id = Number(snapshotId);
+        if (!Number.isInteger(id) || id <= 0) {
+            const err = new Error(
+                'A valid mutual network snapshot ID is required.'
+            );
+            err.status = 400;
+            throw err;
+        }
+        const rows = await this.sqliteExecute(
+            `SELECT id, created_at, source, friend_count, edge_count, failed_count,
+                    failures_json, diff_json, snapshot_json
+             FROM headless_mutual_network_snapshots
+             WHERE owner_id = @owner_id AND id = @id`,
+            { '@owner_id': ownerId, '@id': id }
+        );
+        if (!rows.length) {
+            const err = new Error('Mutual network snapshot not found.');
+            err.status = 404;
+            throw err;
+        }
+        const row = rows[0];
+        return {
+            id: Number(row[0]),
+            createdAt: row[1],
+            source: row[2],
+            friendCount: Number(row[3]) || 0,
+            edgeCount: Number(row[4]) || 0,
+            failedCount: Number(row[5]) || 0,
+            failures: parseMaybeJson(row[6]) || [],
+            diff: parseMaybeJson(row[7]) || buildMutualNetworkDiff({}, {}),
+            snapshot: normalizeMutualNetworkSnapshot(
+                parseMaybeJson(row[8]) || {}
+            )
+        };
+    }
+
+    async latestMutualNetworkSnapshot() {
+        const ownerId = this.requireWatchListOwner();
+        const rows = await this.sqliteExecute(
+            `SELECT id, created_at, source, snapshot_json
+             FROM headless_mutual_network_snapshots
+             WHERE owner_id = @owner_id
+             ORDER BY id DESC LIMIT 1`,
+            { '@owner_id': ownerId }
+        );
+        if (!rows.length) return null;
+        return {
+            id: Number(rows[0][0]),
+            createdAt: rows[0][1],
+            source: rows[0][2],
+            snapshot: normalizeMutualNetworkSnapshot(
+                parseMaybeJson(rows[0][3]) || {}
+            )
+        };
+    }
+
+    async persistMutualNetworkSnapshot(
+        snapshot,
+        { source = 'scheduled', failures = [] } = {}
+    ) {
+        const ownerId = this.requireWatchListOwner();
+        const normalized = normalizeMutualNetworkSnapshot(snapshot);
+        const previous = await this.latestMutualNetworkSnapshot();
+        const diff = buildMutualNetworkDiff(
+            previous?.snapshot || {},
+            normalized
+        );
+        const now = new Date().toJSON();
+        await this.sqliteNonQuery(
+            `INSERT INTO headless_mutual_network_snapshots
+                (owner_id, created_at, source, friend_count, edge_count, failed_count,
+                 failures_json, diff_json, snapshot_json)
+             VALUES (@owner_id, @created_at, @source, @friend_count, @edge_count,
+                     @failed_count, @failures_json, @diff_json, @snapshot_json)`,
+            {
+                '@owner_id': ownerId,
+                '@created_at': now,
+                '@source': source,
+                '@friend_count': Object.keys(normalized).length,
+                '@edge_count': countMutualNetworkEdges(normalized),
+                '@failed_count': failures.length,
+                '@failures_json': JSON.stringify(failures),
+                '@diff_json': JSON.stringify(diff),
+                '@snapshot_json': JSON.stringify(normalized)
+            }
+        );
+        await this.replaceCurrentMutualNetwork(normalized, now);
+        this.broadcast({ type: 'mutual-network-refresh' });
+        return await this.latestMutualNetworkSnapshot();
+    }
+
+    async seedMutualNetworkSnapshotFromCurrent() {
+        if (await this.latestMutualNetworkSnapshot()) return false;
+        const prefix = userPrefix(this.requireWatchListOwner());
+        const rows = await this.sqliteExecute(
+            `SELECT f.friend_id, l.mutual_id
+             FROM ${prefix}_mutual_graph_friends f
+             LEFT JOIN ${prefix}_mutual_graph_links l ON l.friend_id = f.friend_id
+             ORDER BY f.friend_id, l.mutual_id`
+        );
+        if (!rows.length) return false;
+        const snapshot = {};
+        for (const [friendId, mutualId] of rows) {
+            if (!snapshot[friendId]) snapshot[friendId] = [];
+            if (mutualId) snapshot[friendId].push(mutualId);
+        }
+        await this.persistMutualNetworkSnapshot(snapshot, { source: 'legacy' });
+        return true;
+    }
+
+    async replaceCurrentMutualNetwork(snapshot, fetchedAt) {
+        const prefix = userPrefix(this.requireWatchListOwner());
+        await this.sqliteNonQuery('BEGIN');
+        try {
+            await this.sqliteNonQuery(
+                `DELETE FROM ${prefix}_mutual_graph_links`
+            );
+            await this.sqliteNonQuery(
+                `DELETE FROM ${prefix}_mutual_graph_friends`
+            );
+            await this.sqliteNonQuery(
+                `DELETE FROM ${prefix}_mutual_graph_meta`
+            );
+            for (const [friendId, mutualIds] of Object.entries(snapshot)) {
+                await this.sqliteNonQuery(
+                    `INSERT INTO ${prefix}_mutual_graph_friends (friend_id) VALUES (@friend_id)`,
+                    { '@friend_id': friendId }
+                );
+                await this.sqliteNonQuery(
+                    `INSERT INTO ${prefix}_mutual_graph_meta
+                        (friend_id, last_fetched_at, opted_out)
+                     VALUES (@friend_id, @fetched_at, 0)`,
+                    { '@friend_id': friendId, '@fetched_at': fetchedAt }
+                );
+                for (const mutualId of mutualIds) {
+                    await this.sqliteNonQuery(
+                        `INSERT INTO ${prefix}_mutual_graph_links (friend_id, mutual_id)
+                         VALUES (@friend_id, @mutual_id)`,
+                        { '@friend_id': friendId, '@mutual_id': mutualId }
+                    );
+                }
+            }
+            await this.sqliteNonQuery('COMMIT');
+        } catch (err) {
+            await this.sqliteNonQuery('ROLLBACK');
+            throw err;
+        }
+    }
+
+    async fetchMutualNetwork({ source = 'scheduled' } = {}) {
+        if (this.mutualNetworkFetchInFlight) return null;
+        this.mutualNetworkFetchInFlight = true;
+        try {
+            if (!this.loggedIn || !this.currentUser?.id) return null;
+            if (!this.friends.size) await this.loadFriendSnapshot();
+            const previous = await this.latestMutualNetworkSnapshot();
+            const previousSnapshot = previous?.snapshot || {};
+            const friendIds = [...this.friends.keys()]
+                .filter((id) => /^usr_[0-9a-fA-F-]{36}$/.test(id))
+                .sort();
+            const snapshot = {};
+            const failures = [];
+            for (const friendId of friendIds) {
+                if (!this.loggedIn) return null;
+                try {
+                    const mutuals =
+                        await this.fetchWatchMutualFriends(friendId);
+                    snapshot[friendId] = mutuals
+                        .map((entry) => entry.id)
+                        .filter(Boolean);
+                } catch (err) {
+                    snapshot[friendId] = previousSnapshot[friendId] || [];
+                    failures.push({
+                        userId: friendId,
+                        message: err.message || String(err)
+                    });
+                }
+                await new Promise((resolve) =>
+                    setTimeout(resolve, mutualNetworkRequestDelayMs)
+                );
+            }
+            return await this.persistMutualNetworkSnapshot(snapshot, {
+                source,
+                failures
+            });
+        } finally {
+            this.mutualNetworkFetchInFlight = false;
+        }
+    }
+
+    async fetchDueMutualNetwork() {
+        if (this.mutualNetworkFetchInFlight || !this.loggedIn) return null;
+        const latest = await this.latestMutualNetworkSnapshot();
+        const lastFetchedAt = Date.parse(latest?.createdAt) || 0;
+        if (
+            latest?.source !== 'legacy' &&
+            lastFetchedAt &&
+            Date.now() - lastFetchedAt < mutualNetworkIntervalMs
+        ) {
+            return null;
+        }
+        return await this.fetchMutualNetwork({ source: 'scheduled' });
+    }
+
+    requireWatchListOwner() {
+        if (!this.loggedIn || !this.currentUser?.id) {
+            const err = new Error('The backend is not logged in.');
+            err.status = 401;
+            throw err;
+        }
+        return this.currentUser.id;
+    }
+
+    async listWatchUsers() {
+        const ownerId = this.requireWatchListOwner();
+        const rows = await this.sqliteExecute(
+            `SELECT user_id, created_at, updated_at, interval_ms, enabled,
+                    last_polled_at, last_attempt_at, last_error, display_name,
+                    profile_json, mutuals_json
+             FROM headless_watch_users
+             WHERE owner_id = @owner_id
+             ORDER BY lower(display_name), user_id`,
+            { '@owner_id': ownerId }
+        );
+        return rows.map((row) => ({
+            userId: row[0],
+            createdAt: row[1],
+            updatedAt: row[2],
+            intervalMs: Number(row[3]) || defaultWatchIntervalMs,
+            enabled: !!row[4],
+            lastPolledAt: row[5] || '',
+            lastAttemptAt: row[6] || '',
+            lastError: row[7] || '',
+            displayName: row[8] || '',
+            hasProfileSnapshot: !!row[9],
+            hasMutualsSnapshot: !!row[10],
+            mutualCount: Array.isArray(parseMaybeJson(row[10]))
+                ? parseMaybeJson(row[10]).length
+                : null
+        }));
+    }
+
+    async listWatchChanges({ userId = '', limit = 200 } = {}) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedLimit = Math.min(
+            500,
+            Math.max(1, Number(limit) || 200)
+        );
+        const normalizedUserId = userId ? validateWatchUserId(userId) : '';
+        const rows = await this.sqliteExecute(
+            `SELECT id, user_id, created_at, source, kind, diff_json, snapshot_json
+             FROM headless_watch_changes
+             WHERE owner_id = @owner_id
+               AND (@user_id = '' OR user_id = @user_id)
+             ORDER BY id DESC
+             LIMIT @limit`,
+            {
+                '@owner_id': ownerId,
+                '@user_id': normalizedUserId,
+                '@limit': normalizedLimit
+            }
+        );
+        return rows.map((row) => ({
+            id: Number(row[0]),
+            userId: row[1],
+            createdAt: row[2],
+            source: row[3],
+            kind: row[4],
+            diff: parseMaybeJson(row[5]) || [],
+            snapshot: parseMaybeJson(row[6])
+        }));
+    }
+
+    async addWatchUser(userId, intervalMs = defaultWatchIntervalMs) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedUserId = validateWatchUserId(userId);
+        const normalizedInterval = normalizeWatchInterval(intervalMs);
+        const now = new Date().toJSON();
+        await this.sqliteNonQuery(
+            `INSERT INTO headless_watch_users
+                (owner_id, user_id, created_at, updated_at, interval_ms, enabled)
+             VALUES (@owner_id, @user_id, @now, @now, @interval_ms, 1)
+             ON CONFLICT(owner_id, user_id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                interval_ms = excluded.interval_ms,
+                enabled = 1`,
+            {
+                '@owner_id': ownerId,
+                '@user_id': normalizedUserId,
+                '@now': now,
+                '@interval_ms': normalizedInterval
+            }
+        );
+        await this.pollWatchUser(normalizedUserId);
+        return await this.listWatchUsers();
+    }
+
+    async updateWatchUser(userId, { intervalMs, enabled } = {}) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedUserId = validateWatchUserId(userId);
+        const rows = await this.sqliteExecute(
+            'SELECT interval_ms, enabled FROM headless_watch_users WHERE owner_id = @owner_id AND user_id = @user_id',
+            { '@owner_id': ownerId, '@user_id': normalizedUserId }
+        );
+        if (!rows.length) {
+            const err = new Error('Watch list entry not found.');
+            err.status = 404;
+            throw err;
+        }
+        await this.sqliteNonQuery(
+            `UPDATE headless_watch_users
+             SET interval_ms = @interval_ms, enabled = @enabled, updated_at = @updated_at
+             WHERE owner_id = @owner_id AND user_id = @user_id`,
+            {
+                '@interval_ms':
+                    intervalMs === undefined
+                        ? Number(rows[0][0])
+                        : normalizeWatchInterval(intervalMs),
+                '@enabled':
+                    enabled === undefined
+                        ? Number(rows[0][1])
+                        : enabled
+                          ? 1
+                          : 0,
+                '@updated_at': new Date().toJSON(),
+                '@owner_id': ownerId,
+                '@user_id': normalizedUserId
+            }
+        );
+        this.broadcast({ type: 'watch-list-refresh' });
+        return await this.listWatchUsers();
+    }
+
+    async removeWatchUser(userId) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedUserId = validateWatchUserId(userId);
+        await this.sqliteNonQuery(
+            'DELETE FROM headless_watch_changes WHERE owner_id = @owner_id AND user_id = @user_id',
+            { '@owner_id': ownerId, '@user_id': normalizedUserId }
+        );
+        await this.sqliteNonQuery(
+            'DELETE FROM headless_watch_users WHERE owner_id = @owner_id AND user_id = @user_id',
+            { '@owner_id': ownerId, '@user_id': normalizedUserId }
+        );
+        this.broadcast({ type: 'watch-list-refresh' });
+        return await this.listWatchUsers();
+    }
+
+    async fetchWatchMutualFriends(userId) {
+        const mutuals = [];
+        for (let offset = 0; offset < 50000; offset += 100) {
+            const page = await this.vrchatRequest(
+                `users/${userId}/mutuals/friends`,
+                {
+                    method: 'GET',
+                    params: { n: 100, offset }
+                }
+            );
+            if (!Array.isArray(page)) break;
+            mutuals.push(...page);
+            if (page.length < 100) break;
+        }
+        return mutuals
+            .map(canonicalizeJson)
+            .sort((a, b) =>
+                String(a?.id || '').localeCompare(String(b?.id || ''))
+            );
+    }
+
+    async fetchWatchProfile(userId) {
+        const profile = await this.vrchatRequest(`users/${userId}`);
+        const avatarInfo = await this.getAvatarInfo(
+            profile?.currentAvatarImageUrl ||
+                profile?.currentAvatarThumbnailImageUrl ||
+                ''
+        );
+        return canonicalizeWatchSnapshot(
+            {
+                ...(profile || {}),
+                avatarName: avatarInfo.avatarName || '-'
+            },
+            'profile'
+        );
+    }
+
+    async recordWatchSnapshot(ownerId, userId, source, previousJson, snapshot) {
+        const normalized = canonicalizeWatchSnapshot(snapshot, source);
+        const hasPreviousSnapshot =
+            typeof previousJson === 'string' &&
+            previousJson.trim() !== '' &&
+            previousJson !== 'null';
+        const previous = hasPreviousSnapshot
+            ? parseMaybeJson(previousJson)
+            : null;
+        const previousForDiff =
+            source === 'mutuals' && Array.isArray(previous)
+                ? Object.fromEntries(
+                      previous.map((entry) => [entry?.id || '', entry])
+                  )
+                : previous;
+        const nextForDiff =
+            source === 'mutuals' && Array.isArray(normalized)
+                ? Object.fromEntries(
+                      normalized.map((entry) => [entry?.id || '', entry])
+                  )
+                : normalized;
+        const diff = hasPreviousSnapshot
+            ? buildJsonDiff(previousForDiff, nextForDiff)
+            : [{ op: 'add', path: '$', after: normalized }];
+        if (!diff.length) return false;
+        const now = new Date().toJSON();
+        await this.sqliteNonQuery(
+            `INSERT INTO headless_watch_changes
+                (owner_id, user_id, created_at, source, kind, diff_json, snapshot_json)
+             VALUES (@owner_id, @user_id, @created_at, @source, @kind, @diff_json, @snapshot_json)`,
+            {
+                '@owner_id': ownerId,
+                '@user_id': userId,
+                '@created_at': now,
+                '@source': source,
+                '@kind': hasPreviousSnapshot ? 'change' : 'baseline',
+                '@diff_json': JSON.stringify(diff),
+                '@snapshot_json': JSON.stringify(normalized)
+            }
+        );
+        return true;
+    }
+
+    async pollWatchUser(userId) {
+        const ownerId = this.requireWatchListOwner();
+        const normalizedUserId = validateWatchUserId(userId);
+        const pollKey = `${ownerId}:${normalizedUserId}`;
+        if (this.watchUserPolls.has(pollKey))
+            return await this.watchUserPolls.get(pollKey);
+
+        const poll = (async () => {
+            const rows = await this.sqliteExecute(
+                `SELECT profile_json, mutuals_json
+                 FROM headless_watch_users
+                 WHERE owner_id = @owner_id AND user_id = @user_id`,
+                { '@owner_id': ownerId, '@user_id': normalizedUserId }
+            );
+            if (!rows.length) {
+                const err = new Error('Watch list entry not found.');
+                err.status = 404;
+                throw err;
+            }
+            const [profileJson, mutualsJson] = rows[0];
+            const errors = [];
+            let profile = null;
+            let mutuals = null;
+            let changed = false;
+
+            try {
+                profile = await this.fetchWatchProfile(normalizedUserId);
+                changed =
+                    (await this.recordWatchSnapshot(
+                        ownerId,
+                        normalizedUserId,
+                        'profile',
+                        profileJson,
+                        profile
+                    )) || changed;
+            } catch (err) {
+                errors.push(`Profile: ${err.message || err}`);
+            }
+
+            try {
+                mutuals = await this.fetchWatchMutualFriends(normalizedUserId);
+                changed =
+                    (await this.recordWatchSnapshot(
+                        ownerId,
+                        normalizedUserId,
+                        'mutuals',
+                        mutualsJson,
+                        mutuals
+                    )) || changed;
+            } catch (err) {
+                errors.push(`Mutual friends: ${err.message || err}`);
+            }
+
+            const now = new Date().toJSON();
+            await this.sqliteNonQuery(
+                `UPDATE headless_watch_users
+                 SET updated_at = @now,
+                     last_attempt_at = @now,
+                     last_polled_at = CASE WHEN @success = 1 THEN @now ELSE last_polled_at END,
+                     last_error = @last_error,
+                     display_name = COALESCE(@display_name, display_name),
+                     profile_json = COALESCE(@profile_json, profile_json),
+                     mutuals_json = COALESCE(@mutuals_json, mutuals_json)
+                 WHERE owner_id = @owner_id AND user_id = @user_id`,
+                {
+                    '@now': now,
+                    '@success': errors.length === 0 ? 1 : 0,
+                    '@last_error': errors.join('\n'),
+                    '@display_name': profile?.displayName || null,
+                    '@profile_json': profile
+                        ? JSON.stringify(
+                              canonicalizeWatchSnapshot(profile, 'profile')
+                          )
+                        : null,
+                    '@mutuals_json': mutuals ? JSON.stringify(mutuals) : null,
+                    '@owner_id': ownerId,
+                    '@user_id': normalizedUserId
+                }
+            );
+            this.broadcast({ type: 'watch-list-refresh' });
+            return { ok: errors.length === 0, changed, errors };
+        })();
+        this.watchUserPolls.set(pollKey, poll);
+        try {
+            return await poll;
+        } finally {
+            this.watchUserPolls.delete(pollKey);
+        }
+    }
+
+    async pollDueWatchUsers() {
+        if (
+            !this.loggedIn ||
+            !this.currentUser?.id ||
+            this.watchListPollInFlight
+        )
+            return;
+        this.watchListPollInFlight = true;
+        try {
+            const users = await this.listWatchUsers();
+            const now = Date.now();
+            for (const user of users) {
+                if (!this.loggedIn || !user.enabled) continue;
+                const lastAttempt = Date.parse(user.lastAttemptAt) || 0;
+                const retryInterval = user.lastError
+                    ? Math.min(user.intervalMs, watchRetryIntervalMs)
+                    : user.intervalMs;
+                if (lastAttempt && now - lastAttempt < retryInterval) continue;
+                await this.pollWatchUser(user.userId);
+            }
+        } finally {
+            this.watchListPollInFlight = false;
+        }
+    }
+
     async connectPipeline() {
-        if (!this.loggedIn || this.pipelineSocket) return;
+        if (
+            !this.loggedIn ||
+            this.pipelineSocket ||
+            this.pipelineConnectInFlight
+        ) {
+            return;
+        }
+        this.pipelineConnectInFlight = true;
         try {
             const auth = await this.vrchatRequest('auth');
             if (!auth?.ok || !auth.token) return;
-            const socket = new WebSocketClient(
+            if (!this.loggedIn || this.pipelineSocket) return;
+            const socket = this.createPipelineSocket(
                 `${this.websocketDomain}/?auth=${encodeURIComponent(auth.token)}`,
                 {
                     handshakeTimeout: 15000,
@@ -1631,6 +2555,10 @@ class HeadlessSession {
             socket.isAlive = true;
             this.pipelineSocket = socket;
             socket.on('open', () => {
+                if (this.pipelineSocket !== socket) {
+                    socket.close();
+                    return;
+                }
                 socket.isAlive = true;
                 this.websocketConnected = true;
                 this.startPipelineHeartbeat(socket);
@@ -1641,9 +2569,8 @@ class HeadlessSession {
                 socket.isAlive = true;
             });
             socket.on('close', (code, reason) => {
-                if (this.pipelineSocket === socket) {
-                    this.pipelineSocket = null;
-                }
+                if (this.pipelineSocket !== socket) return;
+                this.pipelineSocket = null;
                 this.stopPipelineHeartbeat(socket);
                 this.websocketConnected = false;
                 this.broadcast({ type: 'state', state: this.state() });
@@ -1664,16 +2591,22 @@ class HeadlessSession {
                 }
             });
             socket.on('message', async (data) => {
+                if (this.pipelineSocket !== socket) return;
                 const raw = Buffer.isBuffer(data)
                     ? data.toString('utf8')
                     : String(data);
                 await this.handlePipelineMessage(raw);
             });
         } catch (err) {
-            console.warn('Failed to connect VRChat Pipeline:', err.message || err);
+            console.warn(
+                'Failed to connect VRChat Pipeline:',
+                err.message || err
+            );
             if (
                 this.loggedIn &&
-                String(err?.message || '').toLowerCase().includes('two-factor')
+                String(err?.message || '')
+                    .toLowerCase()
+                    .includes('two-factor')
             ) {
                 await this.markAuthenticationLost(
                     'VRChat requires two-factor authentication again'
@@ -1681,7 +2614,13 @@ class HeadlessSession {
                 return;
             }
             this.schedulePipelineReconnect();
+        } finally {
+            this.pipelineConnectInFlight = false;
         }
+    }
+
+    createPipelineSocket(url, options) {
+        return new WebSocketClient(url, options);
     }
 
     closePipeline() {
@@ -1704,6 +2643,7 @@ class HeadlessSession {
 
     startPipelineHeartbeat(socket) {
         this.stopPipelineHeartbeat();
+        this.pipelineHeartbeatSocket = socket;
         this.pipelineHeartbeatTimer = setInterval(() => {
             if (this.pipelineSocket !== socket) {
                 this.stopPipelineHeartbeat(socket);
@@ -1718,7 +2658,9 @@ class HeadlessSession {
                 return;
             }
             if (socket.isAlive === false) {
-                console.warn('VRChat Pipeline heartbeat timed out; reconnecting.');
+                console.warn(
+                    'VRChat Pipeline heartbeat timed out; reconnecting.'
+                );
                 try {
                     socket.terminate();
                 } catch {
@@ -1741,13 +2683,12 @@ class HeadlessSession {
     }
 
     stopPipelineHeartbeat(socket = null) {
-        if (socket && this.pipelineSocket === socket && this.websocketConnected) {
-            return;
-        }
+        if (socket && this.pipelineHeartbeatSocket !== socket) return;
         if (this.pipelineHeartbeatTimer) {
             clearInterval(this.pipelineHeartbeatTimer);
             this.pipelineHeartbeatTimer = null;
         }
+        this.pipelineHeartbeatSocket = null;
     }
 
     schedulePipelineReconnect() {
@@ -1765,7 +2706,10 @@ class HeadlessSession {
             if (!this.loggedIn) return;
             if (!this.pipelineSocket || !this.websocketConnected) {
                 this.connectPipeline().catch((err) => {
-                    console.warn('Pipeline recovery failed:', err.message || err);
+                    console.warn(
+                        'Pipeline recovery failed:',
+                        err.message || err
+                    );
                 });
             }
         }, 60000);
@@ -1786,7 +2730,10 @@ class HeadlessSession {
             this.lastPipelineMessage = raw;
             const json = JSON.parse(raw);
             if (typeof json.content === 'string') {
-                json.content = JSON.parse(json.content);
+                const content = json.content.trim();
+                if (content.startsWith('{') || content.startsWith('[')) {
+                    json.content = JSON.parse(content);
+                }
             }
             const receivedAt = new Date().toJSON();
             await this.persistPipelineEvent(json, receivedAt);
@@ -1831,7 +2778,10 @@ class HeadlessSession {
                 }
                 break;
             case 'notification-v2-update':
-                await this.patchNotificationV2(content.id, content.updates || {});
+                await this.patchNotificationV2(
+                    content.id,
+                    content.updates || {}
+                );
                 break;
             case 'see-notification':
             case 'hide-notification':
@@ -1850,7 +2800,9 @@ class HeadlessSession {
                     };
                     this.addCurrentUserFriend(user.id);
                     await this.recordFriendAdded(user);
-                    return await this.mergeUser(user, { state: user.state || 'offline' });
+                    return await this.mergeUser(user, {
+                        state: user.state || 'offline'
+                    });
                 }
                 break;
             case 'friend-delete':
@@ -1950,7 +2902,11 @@ class HeadlessSession {
 
     addCurrentUserFriend(userId) {
         if (!this.currentUser || !userId) return;
-        const friends = new Set(Array.isArray(this.currentUser.friends) ? this.currentUser.friends : []);
+        const friends = new Set(
+            Array.isArray(this.currentUser.friends)
+                ? this.currentUser.friends
+                : []
+        );
         friends.add(userId);
         this.currentUser.friends = Array.from(friends);
     }
@@ -1959,7 +2915,9 @@ class HeadlessSession {
         if (!this.currentUser || !userId) return;
         const removeFrom = (field) => {
             if (Array.isArray(this.currentUser[field])) {
-                this.currentUser[field] = this.currentUser[field].filter((id) => id !== userId);
+                this.currentUser[field] = this.currentUser[field].filter(
+                    (id) => id !== userId
+                );
             }
         };
         removeFrom('friends');
@@ -1990,10 +2948,12 @@ class HeadlessSession {
                         worldId: content.worldId,
                         instanceId: parseLocation(content.location).instanceId,
                         travelingToLocation: content.travelingToLocation,
-                        travelingToWorld: parseLocation(content.travelingToLocation)
-                            .worldId,
-                        travelingToInstance: parseLocation(content.travelingToLocation)
-                            .instanceId,
+                        travelingToWorld: parseLocation(
+                            content.travelingToLocation
+                        ).worldId,
+                        travelingToInstance: parseLocation(
+                            content.travelingToLocation
+                        ).instanceId,
                         ...(content.user || {})
                     },
                     state: 'online'
@@ -2037,10 +2997,12 @@ class HeadlessSession {
                         worldId: content.worldId,
                         instanceId: parseLocation(content.location).instanceId,
                         travelingToLocation: content.travelingToLocation,
-                        travelingToWorld: parseLocation(content.travelingToLocation)
-                            .worldId,
-                        travelingToInstance: parseLocation(content.travelingToLocation)
-                            .instanceId,
+                        travelingToWorld: parseLocation(
+                            content.travelingToLocation
+                        ).worldId,
+                        travelingToInstance: parseLocation(
+                            content.travelingToLocation
+                        ).instanceId,
                         ...(content.user || {}),
                         state: 'online'
                     },
@@ -2079,10 +3041,14 @@ class HeadlessSession {
                     continue;
                 }
                 const now = Date.parse(createdAt) || Date.now();
-                const diff = this.mergeFriendRecord(replayFriends, normalized.user, {
-                    state: normalized.state,
-                    now
-                });
+                const diff = this.mergeFriendRecord(
+                    replayFriends,
+                    normalized.user,
+                    {
+                        state: normalized.state,
+                        now
+                    }
+                );
                 if (!diff) continue;
                 await this.applyFeedDiff({
                     ...diff,
@@ -2090,12 +3056,19 @@ class HeadlessSession {
                     includePresence: false
                 });
             } catch (err) {
-                console.warn('Failed to replay Pipeline event:', err.message || err);
+                console.warn(
+                    'Failed to replay Pipeline event:',
+                    err.message || err
+                );
             }
         }
     }
 
-    mergeFriendRecord(targetMap, user, { state = user.state, now = Date.now() } = {}) {
+    mergeFriendRecord(
+        targetMap,
+        user,
+        { state = user.state, now = Date.now() } = {}
+    ) {
         if (!user?.id) return;
         const initialState = state || user.state || 'offline';
         const previousExisted = targetMap.has(user.id);
@@ -2188,7 +3161,11 @@ class HeadlessSession {
     }
 
     createGpsFeedEntry(previous, next, now, createdAt) {
-        if (!next.location || next.location === 'offline' || next.location === 'traveling') {
+        if (
+            !next.location ||
+            next.location === 'offline' ||
+            next.location === 'traveling'
+        ) {
             return null;
         }
         let previousLocation = previous.location || '';
@@ -2230,11 +3207,17 @@ class HeadlessSession {
 
         if (includePresence && stateChanged) {
             feedChanged =
-                (await this.persistPresenceTransition(previous, next)) || feedChanged;
+                (await this.persistPresenceTransition(previous, next)) ||
+                feedChanged;
         }
 
         if (!stateChanged && locationChanged) {
-            const gpsEntry = this.createGpsFeedEntry(previous, next, now, createdAt);
+            const gpsEntry = this.createGpsFeedEntry(
+                previous,
+                next,
+                now,
+                createdAt
+            );
             if (gpsEntry) {
                 await this.addGpsFeed(gpsEntry);
                 feedChanged = true;
@@ -2264,7 +3247,12 @@ class HeadlessSession {
             feedChanged = true;
         }
 
-        if (hasOwn(incoming, 'bio') && previous.bio && next.bio && previous.bio !== next.bio) {
+        if (
+            hasOwn(incoming, 'bio') &&
+            previous.bio &&
+            next.bio &&
+            previous.bio !== next.bio
+        ) {
             await this.addBioFeed({
                 created_at: createdAt,
                 userId: next.id,
@@ -2287,7 +3275,9 @@ class HeadlessSession {
             JSON.stringify(previous.currentAvatarTags || []) !==
                 JSON.stringify(next.currentAvatarTags || []);
         if (
-            (avatarImageChanged || avatarThumbnailChanged || avatarTagsChanged) &&
+            (avatarImageChanged ||
+                avatarThumbnailChanged ||
+                avatarTagsChanged) &&
             !next.profilePicOverride &&
             (next.currentAvatarImageUrl || next.currentAvatarThumbnailImageUrl)
         ) {
@@ -2298,7 +3288,8 @@ class HeadlessSession {
                 currentAvatarImageUrl: next.currentAvatarImageUrl || '',
                 currentAvatarThumbnailImageUrl:
                     next.currentAvatarThumbnailImageUrl || '',
-                previousCurrentAvatarImageUrl: previous.currentAvatarImageUrl || '',
+                previousCurrentAvatarImageUrl:
+                    previous.currentAvatarImageUrl || '',
                 previousCurrentAvatarThumbnailImageUrl:
                     previous.currentAvatarThumbnailImageUrl || '',
                 fallbackAvatarName: next.currentAvatar || ''
@@ -2354,7 +3345,10 @@ class HeadlessSession {
         if (!user?.id) return user;
         const knownState = this.friends.get(user.id)?.state;
         const state =
-            fallbackState || user.state || knownState || this.stateForUserId(user.id);
+            fallbackState ||
+            user.state ||
+            knownState ||
+            this.stateForUserId(user.id);
         this.mergeFriendRecord(this.friends, user, { state });
         return {
             ...user,
@@ -2363,7 +3357,9 @@ class HeadlessSession {
     }
 
     currentUserWithSessionFriendLists(user) {
-        const ids = new Set([...(Array.isArray(user.friends) ? user.friends : [])]);
+        const ids = new Set([
+            ...(Array.isArray(user.friends) ? user.friends : [])
+        ]);
         const onlineFriends = new Set(
             Array.isArray(user.onlineFriends) ? user.onlineFriends : []
         );
@@ -2402,16 +3398,22 @@ class HeadlessSession {
         if (!payload || typeof payload !== 'object') return data;
         try {
             if (endpoint === 'auth/user' && !Array.isArray(payload)) {
-                return JSON.stringify(this.currentUserWithSessionFriendLists(payload));
+                return JSON.stringify(
+                    this.currentUserWithSessionFriendLists(payload)
+                );
             }
             if (endpoint === 'auth/user/friends' && Array.isArray(payload)) {
                 const requestUrl = new URL(url);
-                const offline = requestUrl.searchParams.get('offline') === 'true';
+                const offline =
+                    requestUrl.searchParams.get('offline') === 'true';
                 return JSON.stringify(
                     payload.map((user) =>
                         this.applySessionFields(
                             user,
-                            this.stateForUserId(user.id, offline ? 'offline' : user.state)
+                            this.stateForUserId(
+                                user.id,
+                                offline ? 'offline' : user.state
+                            )
                         )
                     )
                 );
@@ -2424,7 +3426,9 @@ class HeadlessSession {
                 return JSON.stringify(
                     this.applySessionFields(
                         payload,
-                        payload.state || this.friends.get(payload.id)?.state || ''
+                        payload.state ||
+                            this.friends.get(payload.id)?.state ||
+                            ''
                     )
                 );
             }
@@ -2456,7 +3460,8 @@ class HeadlessSession {
 
     async getWorldName(worldId) {
         if (!worldId) return '';
-        if (this.worldNameCache.has(worldId)) return this.worldNameCache.get(worldId);
+        if (this.worldNameCache.has(worldId))
+            return this.worldNameCache.get(worldId);
         try {
             const world = await this.vrchatRequest(`worlds/${worldId}`);
             const name = world?.name || '';
@@ -2470,7 +3475,8 @@ class HeadlessSession {
 
     async getGroupName(groupId) {
         if (!groupId) return '';
-        if (this.groupNameCache.has(groupId)) return this.groupNameCache.get(groupId);
+        if (this.groupNameCache.has(groupId))
+            return this.groupNameCache.get(groupId);
         try {
             const group = await this.vrchatRequest(`groups/${groupId}`);
             const name = group?.name || group?.shortCode || '';
@@ -2486,7 +3492,9 @@ class HeadlessSession {
         const wasOnline = previous.state === 'online';
         const isOnline = next.state === 'online';
         if (!wasOnline && isOnline) {
-            const { worldName, groupName } = await this.locationNames(next.location);
+            const { worldName, groupName } = await this.locationNames(
+                next.location
+            );
             await this.addOnlineOfflineFeed({
                 type: 'Online',
                 userId: next.id,
@@ -2498,7 +3506,9 @@ class HeadlessSession {
             });
             return true;
         } else if (wasOnline && !isOnline) {
-            const { worldName, groupName } = await this.locationNames(previous.location);
+            const { worldName, groupName } = await this.locationNames(
+                previous.location
+            );
             await this.addOnlineOfflineFeed({
                 type: 'Offline',
                 userId: next.id,
@@ -2532,7 +3542,9 @@ class HeadlessSession {
 
     async addGpsFeed(entry) {
         const prefix = userPrefix(this.currentUser.id);
-        const { worldName, groupName } = await this.locationNames(entry.location);
+        const { worldName, groupName } = await this.locationNames(
+            entry.location
+        );
         await this.sqliteNonQuery(
             `INSERT INTO ${prefix}_feed_gps (created_at, user_id, display_name, location, world_name, previous_location, time, group_name)
              SELECT @created_at, @user_id, @display_name, @location, @world_name, @previous_location, @time, @group_name
@@ -2569,7 +3581,8 @@ class HeadlessSession {
                 '@status': entry.status || '',
                 '@status_description': entry.statusDescription || '',
                 '@previous_status': entry.previousStatus || '',
-                '@previous_status_description': entry.previousStatusDescription || ''
+                '@previous_status_description':
+                    entry.previousStatusDescription || ''
             }
         );
     }
@@ -2757,7 +3770,10 @@ class HeadlessSession {
         return true;
     }
 
-    async recordFriendDeleted(userId, { createdAt = new Date().toJSON() } = {}) {
+    async recordFriendDeleted(
+        userId,
+        { createdAt = new Date().toJSON() } = {}
+    ) {
         if (!this.currentUser?.id || !userId) return false;
         const existing = await this.getFriendLogCurrentMap();
         const previous = existing.get(userId);
@@ -2797,7 +3813,8 @@ class HeadlessSession {
         if (
             previous.trustLevel &&
             next.trustLevel &&
-            normalizeTrustLevel(previous.trustLevel) !== normalizeTrustLevel(next.trustLevel)
+            normalizeTrustLevel(previous.trustLevel) !==
+                normalizeTrustLevel(next.trustLevel)
         ) {
             await this.addFriendLogHistory({
                 created_at: createdAt,
@@ -2814,7 +3831,8 @@ class HeadlessSession {
             changed ||
             previous.displayName !== next.displayName ||
             previous.rawTrustLevel !== previous.trustLevel ||
-            normalizeTrustLevel(previous.trustLevel) !== normalizeTrustLevel(next.trustLevel)
+            normalizeTrustLevel(previous.trustLevel) !==
+                normalizeTrustLevel(next.trustLevel)
         ) {
             await this.setFriendLogCurrent(next);
         }
@@ -2822,12 +3840,17 @@ class HeadlessSession {
     }
 
     async reconcileFriendLogSnapshot(friends) {
-        if (!this.currentUser?.id || !Array.isArray(friends) || !friends.length) {
+        if (
+            !this.currentUser?.id ||
+            !Array.isArray(friends) ||
+            !friends.length
+        ) {
             return false;
         }
         const userId = this.currentUser.id;
         const initialized =
-            (await this.configGet(`friendLogInit_${userId}`, 'false')) === 'true';
+            (await this.configGet(`friendLogInit_${userId}`, 'false')) ===
+            'true';
         const existing = await this.getFriendLogCurrentMap();
         const seen = new Set();
         let changed = false;
@@ -2838,7 +3861,10 @@ class HeadlessSession {
             seen.add(friend.id);
             const previous = existing.get(friend.id);
             if (!previous) {
-                const entry = this.friendLogEntryFromUser(friend, initialized ? ++nextNumber : 0);
+                const entry = this.friendLogEntryFromUser(
+                    friend,
+                    initialized ? ++nextNumber : 0
+                );
                 if (initialized) {
                     await this.addFriendLogHistory({
                         type: 'Friend',
@@ -2852,12 +3878,14 @@ class HeadlessSession {
                 continue;
             }
             changed =
-                (await this.updateFriendLogForUser(friend, { existing })) || changed;
+                (await this.updateFriendLogForUser(friend, { existing })) ||
+                changed;
         }
 
         if (initialized) {
             for (const [userIdToDelete, previous] of existing.entries()) {
-                if (seen.has(userIdToDelete) || userIdToDelete === userId) continue;
+                if (seen.has(userIdToDelete) || userIdToDelete === userId)
+                    continue;
                 await this.addFriendLogHistory({
                     type: 'Unfriend',
                     userId: userIdToDelete,
@@ -2881,7 +3909,8 @@ class HeadlessSession {
             `INSERT OR IGNORE INTO ${prefix}_notifications (id, created_at, type, sender_user_id, sender_username, receiver_user_id, message, world_id, world_name, image_url, invite_message, request_message, response_message, expired) VALUES (@id, @created_at, @type, @sender_user_id, @sender_username, @receiver_user_id, @message, @world_id, @world_name, @image_url, @invite_message, @request_message, @response_message, @expired)`,
             {
                 '@id': row.id,
-                '@created_at': row.created_at || row.createdAt || new Date().toJSON(),
+                '@created_at':
+                    row.created_at || row.createdAt || new Date().toJSON(),
                 '@type': row.type || '',
                 '@sender_user_id': row.senderUserId || '',
                 '@sender_username': row.senderUsername || '',
@@ -3070,8 +4099,11 @@ class HeadlessSession {
                 const client = this.getLogStreamClient(machineId);
                 if (message.type === 'hello' || message.type === 'heartbeat') {
                     client.connected = true;
-                    client.currentFile = message.currentFile || client.currentFile || '';
-                    client.fileOffset = Number(message.fileOffset || client.fileOffset || 0);
+                    client.currentFile =
+                        message.currentFile || client.currentFile || '';
+                    client.fileOffset = Number(
+                        message.fileOffset || client.fileOffset || 0
+                    );
                     client.lastSeenAt = new Date().toJSON();
                     client.lastError = '';
                     await this.persistLogStreamClient(client);
@@ -3128,15 +4160,24 @@ class HeadlessSession {
 
         for (const event of events) {
             try {
-                const inserted = await this.persistLogStreamEvent(machineId, event);
+                const inserted = await this.persistLogStreamEvent(
+                    machineId,
+                    event
+                );
                 const fileName = event.file || event.fileName || '';
-                const fileOffset = Number(event.offset || event.fileOffset || 0);
+                const fileOffset = Number(
+                    event.offset || event.fileOffset || 0
+                );
                 if (fileName && fileOffset > (checkpoints[fileName] || 0)) {
                     checkpoints[fileName] = fileOffset;
                 }
                 client.currentFile = fileName || client.currentFile || '';
-                client.fileOffset = Math.max(client.fileOffset || 0, fileOffset || 0);
-                client.lastEventAt = event.loggedAt || event.dt || new Date().toJSON();
+                client.fileOffset = Math.max(
+                    client.fileOffset || 0,
+                    fileOffset || 0
+                );
+                client.lastEventAt =
+                    event.loggedAt || event.dt || new Date().toJSON();
                 if (!inserted) {
                     duplicate++;
                     continue;
@@ -3148,7 +4189,10 @@ class HeadlessSession {
             } catch (err) {
                 failed++;
                 client.lastError = err.message || String(err);
-                console.warn('Failed to ingest log stream event:', err.message || err);
+                console.warn(
+                    'Failed to ingest log stream event:',
+                    err.message || err
+                );
             }
         }
 
@@ -3213,7 +4257,11 @@ class HeadlessSession {
     // activity layer, so self instance boundaries share one writer for de-dupe.
     selfDisplayName() {
         const userId = this.currentUser?.id || '';
-        return this.currentUser?.displayName || this.currentUser?.username || userId;
+        return (
+            this.currentUser?.displayName ||
+            this.currentUser?.username ||
+            userId
+        );
     }
 
     async findNearbyLocationSegment(createdAt, location, windowSeconds = 30) {
@@ -3233,7 +4281,12 @@ class HeadlessSession {
         return rows[0] || null;
     }
 
-    async findNearbySelfJoinLeave(type, createdAt, location, windowSeconds = 30) {
+    async findNearbySelfJoinLeave(
+        type,
+        createdAt,
+        location,
+        windowSeconds = 30
+    ) {
         if (!this.currentUser?.id) return null;
         const rows = await this.sqliteExecute(
             `SELECT id, created_at, time
@@ -3257,7 +4310,10 @@ class HeadlessSession {
 
     async recordSelfInstanceJoin({ createdAt, location, worldName = '' }) {
         if (!this.currentUser?.id || !isRealInstance(location)) return '';
-        const existingSegment = await this.findNearbyLocationSegment(createdAt, location);
+        const existingSegment = await this.findNearbyLocationSegment(
+            createdAt,
+            location
+        );
         const locationCreatedAt = existingSegment?.created_at || createdAt;
         if (!existingSegment) {
             const parsedLocation = parseLocation(location);
@@ -3306,7 +4362,9 @@ class HeadlessSession {
         if (!this.currentUser?.id || !isRealInstance(location)) return false;
         const leaveTime = Date.parse(createdAt) || Date.now();
         const joinedAt =
-            Date.parse(locationCreatedAt) || Number(locationAt || 0) || leaveTime;
+            Date.parse(locationCreatedAt) ||
+            Number(locationAt || 0) ||
+            leaveTime;
         const duration = Math.max(
             0,
             Number.isFinite(time) && time !== null ? time : leaveTime - joinedAt
@@ -3395,7 +4453,8 @@ class HeadlessSession {
         const parsed = event.parsed || {};
         const type = parsed.type || rawLog[2] || '';
         const args = Array.isArray(parsed.args) ? parsed.args : rawLog.slice(3);
-        const createdAt = event.loggedAt || event.dt || rawLog[1] || new Date().toJSON();
+        const createdAt =
+            event.loggedAt || event.dt || rawLog[1] || new Date().toJSON();
         const client = this.getLogStreamClient(machineId);
 
         switch (type) {
@@ -3405,7 +4464,12 @@ class HeadlessSession {
                 if (!location) return false;
                 await this.closePreviousStreamLocation(client, createdAt);
                 const locationCreatedAt = isRealInstance(location)
-                    ? await this.addStreamSelfJoin(client, createdAt, location, worldName)
+                    ? await this.addStreamSelfJoin(
+                          client,
+                          createdAt,
+                          location,
+                          worldName
+                      )
                     : createdAt;
                 if (!isRealInstance(location)) {
                     const parsedLocation = parseLocation(location);
@@ -3424,7 +4488,8 @@ class HeadlessSession {
                 }
                 client.currentLocation = location;
                 client.currentWorldName = worldName || '';
-                client.currentLocationCreatedAt = locationCreatedAt || createdAt;
+                client.currentLocationCreatedAt =
+                    locationCreatedAt || createdAt;
                 client.currentLocationAt =
                     Date.parse(client.currentLocationCreatedAt) ||
                     Date.parse(createdAt) ||
@@ -3442,9 +4507,19 @@ class HeadlessSession {
                 client.players.clear();
                 return true;
             case 'player-joined':
-                return await this.addStreamJoinLeave(client, createdAt, 'OnPlayerJoined', args);
+                return await this.addStreamJoinLeave(
+                    client,
+                    createdAt,
+                    'OnPlayerJoined',
+                    args
+                );
             case 'player-left':
-                return await this.addStreamJoinLeave(client, createdAt, 'OnPlayerLeft', args);
+                return await this.addStreamJoinLeave(
+                    client,
+                    createdAt,
+                    'OnPlayerLeft',
+                    args
+                );
             case 'portal-spawn':
                 await this.sqliteNonQuery(
                     'INSERT OR IGNORE INTO gamelog_portal_spawn (created_at, display_name, location, user_id, instance_id, world_name) VALUES (@created_at, @display_name, @location, @user_id, @instance_id, @world_name)',
@@ -3482,7 +4557,8 @@ class HeadlessSession {
             await this.sqliteNonQuery(
                 'UPDATE gamelog_location SET time = @time WHERE created_at = @created_at AND location = @location',
                 {
-                    '@created_at': client.currentLocationCreatedAt || nextCreatedAt,
+                    '@created_at':
+                        client.currentLocationCreatedAt || nextCreatedAt,
                     '@location': client.currentLocation,
                     '@time': time
                 }
@@ -3502,7 +4578,12 @@ class HeadlessSession {
                 userId,
                 joinTime: now
             });
-            this.updateFriendSameInstanceTimer(userId, displayName, now, client.currentLocation);
+            this.updateFriendSameInstanceTimer(
+                userId,
+                displayName,
+                now,
+                client.currentLocation
+            );
         } else {
             const joined = client.players.get(key);
             if (joined?.joinTime) time = Math.max(0, now - joined.joinTime);
@@ -3523,16 +4604,23 @@ class HeadlessSession {
     }
 
     async addStreamSelfJoin(client, createdAt, location, worldName = '') {
-        if (!this.currentUser?.id || !isRealInstance(location)) return createdAt;
+        if (!this.currentUser?.id || !isRealInstance(location))
+            return createdAt;
         const key = this.currentUser.id;
         const locationCreatedAt = await this.recordSelfInstanceJoin({
             createdAt,
             location,
             worldName
         });
-        const now = Date.parse(locationCreatedAt) || Date.parse(createdAt) || Date.now();
+        const now =
+            Date.parse(locationCreatedAt) ||
+            Date.parse(createdAt) ||
+            Date.now();
         client.players.set(key, {
-            displayName: this.currentUser.displayName || this.currentUser.username || key,
+            displayName:
+                this.currentUser.displayName ||
+                this.currentUser.username ||
+                key,
             userId: key,
             joinTime: now
         });
@@ -3643,16 +4731,25 @@ async function handleHeadlessRoute(req, res, url) {
     try {
         const body = await readJsonBody(req);
 
-        if (req.method === 'POST' && url.pathname === '/headless/session/login') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/session/login'
+        ) {
             jsonResponse(res, 200, await session.login(body));
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/session/logout') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/session/logout'
+        ) {
             await session.logout();
             jsonResponse(res, 200, { ok: true });
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/session/recover') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/session/recover'
+        ) {
             await session.ensureAuthenticated();
             if (session.loggedIn && session.currentUser) {
                 jsonResponse(res, 200, session.currentUser);
@@ -3698,7 +4795,102 @@ async function handleHeadlessRoute(req, res, url) {
             return true;
         }
 
-        if (req.method === 'GET' && url.pathname === '/headless/log-stream/token') {
+        if (
+            req.method === 'GET' &&
+            url.pathname === '/headless/mutual-network/snapshots'
+        ) {
+            jsonResponse(res, 200, {
+                snapshots: await session.listMutualNetworkSnapshots(
+                    url.searchParams.get('limit') || 90
+                ),
+                intervalMs: mutualNetworkIntervalMs,
+                refreshing: session.mutualNetworkFetchInFlight
+            });
+            return true;
+        }
+        const mutualSnapshotMatch = url.pathname.match(
+            /^\/headless\/mutual-network\/snapshots\/(\d+)$/
+        );
+        if (req.method === 'GET' && mutualSnapshotMatch) {
+            jsonResponse(
+                res,
+                200,
+                await session.getMutualNetworkSnapshot(mutualSnapshotMatch[1])
+            );
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/mutual-network/refresh'
+        ) {
+            if (session.mutualNetworkFetchInFlight) {
+                jsonResponse(res, 409, {
+                    error: {
+                        message: 'A mutual network refresh is already running.'
+                    }
+                });
+            } else {
+                jsonResponse(
+                    res,
+                    200,
+                    await session.fetchMutualNetwork({ source: 'manual' })
+                );
+            }
+            return true;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/headless/watch-list') {
+            jsonResponse(res, 200, {
+                items: await session.listWatchUsers(),
+                changes: await session.listWatchChanges({
+                    userId: url.searchParams.get('userId') || '',
+                    limit: url.searchParams.get('limit') || 200
+                }),
+                defaultIntervalMs: defaultWatchIntervalMs,
+                minIntervalMs: minWatchIntervalMs,
+                maxIntervalMs: maxWatchIntervalMs
+            });
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/watch-list/add'
+        ) {
+            jsonResponse(res, 200, {
+                items: await session.addWatchUser(body.userId, body.intervalMs)
+            });
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/watch-list/update'
+        ) {
+            jsonResponse(res, 200, {
+                items: await session.updateWatchUser(body.userId, body)
+            });
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/watch-list/remove'
+        ) {
+            jsonResponse(res, 200, {
+                items: await session.removeWatchUser(body.userId)
+            });
+            return true;
+        }
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/watch-list/poll'
+        ) {
+            jsonResponse(res, 200, await session.pollWatchUser(body.userId));
+            return true;
+        }
+
+        if (
+            req.method === 'GET' &&
+            url.pathname === '/headless/log-stream/token'
+        ) {
             if (process.env.VRCX_LOG_STREAM_ALLOW_TOKEN_READ === '0') {
                 jsonResponse(res, 403, {
                     error: {
@@ -3735,8 +4927,15 @@ async function handleHeadlessRoute(req, res, url) {
             return true;
         }
 
-        if (req.method === 'POST' && url.pathname === '/headless/webapi/execute') {
-            jsonResponse(res, 200, await session.webApiExecute(body.options || body));
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/webapi/execute'
+        ) {
+            jsonResponse(
+                res,
+                200,
+                await session.webApiExecute(body.options || body)
+            );
             return true;
         }
         if (
@@ -3751,13 +4950,19 @@ async function handleHeadlessRoute(req, res, url) {
             });
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/webapi/getCookies') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/webapi/getCookies'
+        ) {
             jsonResponse(res, 200, {
                 value: await session.getCookies()
             });
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/webapi/setCookies') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/webapi/setCookies'
+        ) {
             jsonResponse(res, 409, {
                 error: {
                     message:
@@ -3767,7 +4972,10 @@ async function handleHeadlessRoute(req, res, url) {
             return true;
         }
 
-        if (req.method === 'POST' && url.pathname === '/headless/sqlite/execute') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/sqlite/execute'
+        ) {
             jsonResponse(
                 res,
                 200,
@@ -3796,13 +5004,19 @@ async function handleHeadlessRoute(req, res, url) {
             jsonResponse(res, 200, { ok: true });
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/storage/remove') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/storage/remove'
+        ) {
             jsonResponse(res, 200, {
                 value: await session.call('VRCXStorage', 'Remove', [body.key])
             });
             return true;
         }
-        if (req.method === 'POST' && url.pathname === '/headless/storage/getAll') {
+        if (
+            req.method === 'POST' &&
+            url.pathname === '/headless/storage/getAll'
+        ) {
             jsonResponse(res, 200, {
                 value: await session.call('VRCXStorage', 'GetAll', [])
             });
@@ -3814,7 +5028,11 @@ async function handleHeadlessRoute(req, res, url) {
         );
         if (req.method === 'POST' && dotnetMatch) {
             jsonResponse(res, 200, {
-                value: await session.call(dotnetMatch[1], dotnetMatch[2], body.args || [])
+                value: await session.call(
+                    dotnetMatch[1],
+                    dotnetMatch[2],
+                    body.args || []
+                )
             });
             return true;
         }
@@ -3862,7 +5080,9 @@ function serveStatic(req, res, url) {
         res.writeHead(200, {
             'Content-Type': mimeTypes[ext] || 'application/octet-stream',
             'Cache-Control':
-                ext === '.html' ? 'no-store' : 'public, max-age=31536000, immutable'
+                ext === '.html' || ext === '.json'
+                    ? 'no-store'
+                    : 'public, max-age=31536000, immutable'
         });
         res.end(content);
     });
@@ -3890,7 +5110,10 @@ async function bootstrap() {
     await session.init({ restoreSession: false });
 
     const server = http.createServer(async (req, res) => {
-        const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+        const url = new URL(
+            req.url,
+            `http://${req.headers.host || 'localhost'}`
+        );
         const handled = await handleHeadlessRoute(req, res, url);
         if (handled) return;
         if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -3901,21 +5124,29 @@ async function bootstrap() {
     });
     const logStreamServer = new WebSocketServer({ noServer: true });
     server.on('upgrade', (req, socket, head) => {
-        const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+        const url = new URL(
+            req.url,
+            `http://${req.headers.host || 'localhost'}`
+        );
         if (url.pathname !== '/headless/log-stream/ws') {
             socket.destroy();
             return;
         }
         logStreamServer.handleUpgrade(req, socket, head, (ws) => {
             session.handleLogStreamConnection(ws, req, url).catch((err) => {
-                console.warn('Failed to handle log stream connection:', err.message || err);
+                console.warn(
+                    'Failed to handle log stream connection:',
+                    err.message || err
+                );
                 ws.close(1011, 'Server error');
             });
         });
     });
 
     server.listen(port, host, () => {
-        console.log(`VRCX headless backend listening on http://${host}:${port}`);
+        console.log(
+            `VRCX headless backend listening on http://${host}:${port}`
+        );
         console.log(`VRCX data directory: ${dataDir}`);
     });
 
@@ -3948,6 +5179,14 @@ if (require.main === module) {
 }
 
 module.exports = {
+    buildJsonDiff,
+    buildMutualNetworkDiff,
+    canonicalizeJson,
+    canonicalizeWatchSnapshot,
+    countMutualNetworkEdges,
     CookieJar,
-    HeadlessSession
+    HeadlessSession,
+    normalizeMutualNetworkSnapshot,
+    normalizeWatchInterval,
+    validateWatchUserId
 };

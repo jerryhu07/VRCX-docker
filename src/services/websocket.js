@@ -113,7 +113,10 @@ function connectHeadlessEvents() {
                 useAuthStore()
                     .syncHeadlessSessionState(payload.state)
                     .catch((err) => {
-                        console.error('Failed to sync headless auth state:', err);
+                        console.error(
+                            'Failed to sync headless auth state:',
+                            err
+                        );
                     });
                 if (payload.state.loggedIn) {
                     scheduleHeadlessFeedLookup();
@@ -127,7 +130,25 @@ function connectHeadlessEvents() {
             if (payload.type === 'game-log-refresh') {
                 scheduleHeadlessGameLogLookup();
                 if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('vrcx:game-log-refresh'));
+                    window.dispatchEvent(
+                        new CustomEvent('vrcx:game-log-refresh')
+                    );
+                }
+                return;
+            }
+            if (payload.type === 'watch-list-refresh') {
+                if (typeof window !== 'undefined') {
+                    window.dispatchEvent(
+                        new CustomEvent('vrcx:watch-list-refresh')
+                    );
+                }
+                return;
+            }
+            if (payload.type === 'mutual-network-refresh') {
+                if (typeof window !== 'undefined') {
+                    window.dispatchEvent(
+                        new CustomEvent('vrcx:mutual-network-refresh')
+                    );
                 }
                 return;
             }
@@ -179,9 +200,11 @@ function scheduleHeadlessFeedLookup() {
     }
     headlessFeedLookupTimer = workerTimers.setTimeout(() => {
         headlessFeedLookupTimer = null;
-        useFeedStore().feedTableLookup().catch((err) => {
-            console.error('Headless feed refresh failed:', err);
-        });
+        useFeedStore()
+            .feedTableLookup()
+            .catch((err) => {
+                console.error('Headless feed refresh failed:', err);
+            });
     }, 250);
 }
 
@@ -191,9 +214,11 @@ function scheduleHeadlessGameLogLookup() {
     }
     headlessGameLogLookupTimer = workerTimers.setTimeout(() => {
         headlessGameLogLookupTimer = null;
-        useGameLogStore().gameLogTableLookup().catch((err) => {
-            console.error('Headless game log refresh failed:', err);
-        });
+        useGameLogStore()
+            .gameLogTableLookup()
+            .catch((err) => {
+                console.error('Headless game log refresh failed:', err);
+            });
     }, 250);
 }
 

@@ -8,14 +8,19 @@ async function getLocalizedStrings(code) {
     const fallbackUrl = localizedStringsUrls['./en.json'];
     const url = localizedStringsUrls[`./${code}.json`] || fallbackUrl;
 
+    const fetchMessages = (target) =>
+        fetch(target, {
+            cache: 'no-store'
+        });
+
     try {
-        const res = await fetch(url);
+        const res = await fetchMessages(url);
         if (!res.ok) throw new Error(res.status);
         return await res.json();
     } catch {
         if (url !== fallbackUrl) {
             try {
-                const res = await fetch(fallbackUrl);
+                const res = await fetchMessages(fallbackUrl);
                 return await res.json();
             } catch {
                 return {};

@@ -47,6 +47,7 @@
     "nav_tooltip": {
         "friends_locations": "好友位置",
         "feed": "好友动态",
+        "watch_list": "关注列表",
         "game_log": "游戏日志",
         "player_list": "房内玩家",
         "search": "搜索",
@@ -223,6 +224,25 @@
         }
     },
     "view": {
+        "watch_list": {
+            "header": "关注列表",
+            "summary": "关注 {users} 位用户 · 已记录 {changes} 个快照",
+            "user_id": "VRChat 用户 UID（usr_...）",
+            "interval": "轮询周期",
+            "add": "添加",
+            "search": "搜索关注用户",
+            "all_changes": "全部变化",
+            "enabled": "启用轮询",
+            "poll_now": "立即拉取",
+            "mutual_friends": "共同好友",
+            "profile": "用户资料",
+            "baseline": "初始快照",
+            "raw_snapshot": "原始 JSON 快照",
+            "never": "从未拉取",
+            "just_now": "刚刚",
+            "remove_title": "删除关注用户",
+            "remove_description": "删除 {name} 及其全部变化记录？"
+        },
         "login": {
             "savedAccounts": "已保存的账号",
             "login": "登录",
@@ -567,6 +587,15 @@
                     "mutual_friend_graph_ready_title": "关系网更新成功",
                     "mutual_friend_graph_ready_message": "已完成共同好友数据的拉取，关系网现已更新",
                     "friend_list_changed_fetch_again": "好友列表已更改。请再次拉取共同好友数据。"
+                },
+                "history": {
+                    "title": "关系网快照历史",
+                    "snapshot": "关系网快照",
+                    "summary": "{friends} 位好友 · {edges} 条关系",
+                    "friends": "好友",
+                    "edges": "关系",
+                    "details": "查看变化明细",
+                    "restore_error": "无法还原所选关系网快照"
                 },
                 "settings": {
                     "title": "关系网布局设置",

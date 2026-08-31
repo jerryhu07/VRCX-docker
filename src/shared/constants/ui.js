@@ -9,6 +9,13 @@ const navDefinitions = [
         routeName: 'feed'
     },
     {
+        key: 'watch-list',
+        icon: 'ri-eye-line',
+        tooltip: 'nav_tooltip.watch_list',
+        labelKey: 'nav_tooltip.watch_list',
+        routeName: 'watch-list'
+    },
+    {
         key: 'friends-locations',
         icon: 'ri-user-location-line',
         tooltip: 'nav_tooltip.friends_locations',

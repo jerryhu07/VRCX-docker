@@ -22,6 +22,98 @@
                             </Button>
                         </TooltipWrapper>
                     </div>
+                    <NativeSelect
+                        v-if="networkSnapshots.length"
+                        :model-value="String(selectedSnapshotId || networkSnapshots[0]?.id)"
+                        class="w-48"
+                        :aria-label="t('view.charts.mutual_friend.history.snapshot')"
+                        @update:model-value="restoreSnapshot">
+                        <NativeSelectOption
+                            v-for="snapshot in networkSnapshots"
+                            :key="snapshot.id"
+                            :value="String(snapshot.id)">
+                            {{ formatSnapshotLabel(snapshot) }}
+                        </NativeSelectOption>
+                    </NativeSelect>
+                    <Sheet>
+                        <SheetTrigger as-child>
+                            <Button variant="outline" size="icon" :title="t('view.charts.mutual_friend.history.title')">
+                                <HistoryIcon />
+                            </Button>
+                        </SheetTrigger>
+                        <SheetContent side="right" class="w-105 overflow-y-auto sm:max-w-105">
+                            <SheetHeader>
+                                <SheetTitle>{{ t('view.charts.mutual_friend.history.title') }}</SheetTitle>
+                            </SheetHeader>
+                            <div class="mt-4 divide-y border-y">
+                                <div v-for="snapshot in networkSnapshots" :key="snapshot.id" class="py-3">
+                                    <button
+                                        class="flex w-full items-center gap-2 text-left"
+                                        @click="restoreSnapshot(snapshot.id)">
+                                        <span class="min-w-0 flex-1">
+                                            <span class="block text-sm font-medium">{{
+                                                formatSnapshotDate(snapshot.createdAt)
+                                            }}</span>
+                                            <span class="block text-xs text-muted-foreground">
+                                                {{
+                                                    t('view.charts.mutual_friend.history.summary', {
+                                                        friends: snapshot.friendCount,
+                                                        edges: snapshot.edgeCount
+                                                    })
+                                                }}
+                                            </span>
+                                        </span>
+                                        <CheckIcon
+                                            v-if="selectedSnapshotId === snapshot.id"
+                                            class="size-4 text-emerald-500" />
+                                    </button>
+                                    <div class="mt-2 grid grid-cols-2 gap-2 font-mono text-[11px]">
+                                        <div
+                                            class="bg-[#dafbe1] px-2 py-1.5 text-[#116329] dark:bg-[#12261e] dark:text-[#7ee787]">
+                                            +{{ snapshot.diff.addedFriends.length }}
+                                            {{ t('view.charts.mutual_friend.history.friends') }} · +{{
+                                                snapshot.diff.addedEdges.length
+                                            }}
+                                            {{ t('view.charts.mutual_friend.history.edges') }}
+                                        </div>
+                                        <div
+                                            class="bg-[#ffebe9] px-2 py-1.5 text-[#82071e] dark:bg-[#3d1518] dark:text-[#ffb3ba]">
+                                            -{{ snapshot.diff.removedFriends.length }}
+                                            {{ t('view.charts.mutual_friend.history.friends') }} · -{{
+                                                snapshot.diff.removedEdges.length
+                                            }}
+                                            {{ t('view.charts.mutual_friend.history.edges') }}
+                                        </div>
+                                    </div>
+                                    <details
+                                        v-if="snapshotDiffLines(snapshot).length"
+                                        class="mt-2 text-xs text-muted-foreground">
+                                        <summary class="cursor-pointer select-none">
+                                            {{ t('view.charts.mutual_friend.history.details') }}
+                                        </summary>
+                                        <div class="mt-1 max-h-48 overflow-auto rounded border font-mono text-[11px]">
+                                            <div
+                                                v-for="(line, index) in snapshotDiffLines(snapshot)"
+                                                :key="index"
+                                                class="px-2 py-0.5 whitespace-pre"
+                                                :class="
+                                                    line.kind === 'add'
+                                                        ? 'bg-[#dafbe1] text-[#116329] dark:bg-[#12261e] dark:text-[#7ee787]'
+                                                        : 'bg-[#ffebe9] text-[#82071e] dark:bg-[#3d1518] dark:text-[#ffb3ba]'
+                                                ">
+                                                {{ line.kind === 'add' ? '+' : '-' }} {{ line.text }}
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
+                                <div
+                                    v-if="!networkSnapshots.length"
+                                    class="py-10 text-center text-sm text-muted-foreground">
+                                    {{ t('common.no_data') }}
+                                </div>
+                            </div>
+                        </SheetContent>
+                    </Sheet>
                     <VirtualCombobox
                         v-if="graphReady"
                         class="min-w-60"
@@ -292,11 +384,13 @@
     import {
         Check as CheckIcon,
         EyeOff as EyeOffIcon,
+        History as HistoryIcon,
         RefreshCw as RefreshCwIcon,
         Settings,
         User as UserIcon
     } from 'lucide-vue-next';
     import { Button } from '@/components/ui/button';
+    import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
     import { Progress } from '@/components/ui/progress';
     import { Slider } from '@/components/ui/slider';
     import { Spinner } from '@/components/ui/spinner';
@@ -325,6 +419,11 @@
     import { useUserDisplay } from '../../../composables/useUserDisplay';
     import { showUserDialog } from '../../../coordinators/userCoordinator';
     import { database } from '../../../services/database';
+    import {
+        getMutualNetworkSnapshot,
+        getMutualNetworkSnapshots,
+        refreshMutualNetwork
+    } from '../../../services/mutualNetwork';
     import { watchState } from '../../../services/watchState';
 
     import configRepository from '../../../services/config';
@@ -345,6 +444,7 @@
     const status = chartsStore.mutualGraphStatus;
 
     const MAX_LABEL_NAME_LENGTH = 20;
+    const EMPTY_USER_ID = 'usr_00000000-0000-0000-0000-000000000000';
 
     const COLORS_PALETTE = [
         '#5470c6',
@@ -575,6 +675,89 @@
     const contextMenuNodeId = ref(null);
     const graphMeta = ref(new Map());
     const isRefreshingNode = ref(false);
+    const networkSnapshots = ref([]);
+    const selectedSnapshotId = ref(null);
+
+    function snapshotToMutualMap(snapshot) {
+        const mutualMap = new Map();
+        for (const [friendId, mutualIds] of Object.entries(snapshot || {})) {
+            if (friendId === EMPTY_USER_ID) continue;
+            const friendEntry = friends.value?.get ? friends.value.get(friendId) : undefined;
+            const fallbackRef = friendEntry?.ref || cachedUsers.get(friendId);
+            mutualMap.set(friendId, {
+                friend: friendEntry || (fallbackRef ? { id: friendId, ref: fallbackRef } : { id: friendId }),
+                mutuals: (Array.isArray(mutualIds) ? mutualIds : [])
+                    .filter((id) => id && id !== EMPTY_USER_ID)
+                    .map((id) => ({ id }))
+            });
+        }
+        return mutualMap;
+    }
+
+    async function loadNetworkSnapshots() {
+        try {
+            const data = await getMutualNetworkSnapshots();
+            networkSnapshots.value = data.snapshots || [];
+            return networkSnapshots.value;
+        } catch (err) {
+            console.error('[MutualNetworkGraph] Failed to load snapshot history', err);
+            return [];
+        }
+    }
+
+    async function restoreSnapshot(snapshotId) {
+        const id = Number(snapshotId);
+        if (!id || isLoadingSnapshot.value) return;
+        isLoadingSnapshot.value = true;
+        try {
+            const snapshot = await getMutualNetworkSnapshot(id);
+            selectedSnapshotId.value = snapshot.id;
+            await applyGraph(snapshotToMutualMap(snapshot.snapshot));
+            chartsStore.markMutualGraphLoaded({ notify: false });
+            status.friendSignature = snapshot.friendCount;
+            status.needsRefetch = false;
+        } catch (err) {
+            console.error('[MutualNetworkGraph] Failed to restore snapshot', err);
+            toast.error(t('view.charts.mutual_friend.history.restore_error'));
+        } finally {
+            isLoadingSnapshot.value = false;
+        }
+    }
+
+    function formatSnapshotDate(value) {
+        return dayjs(value).format('YYYY-MM-DD HH:mm');
+    }
+
+    function formatSnapshotLabel(snapshot) {
+        return `${formatSnapshotDate(snapshot.createdAt)} · ${snapshot.edgeCount}`;
+    }
+
+    function displayUserId(userId) {
+        return cachedUsers.get(userId)?.displayName || userId;
+    }
+
+    function snapshotDiffLines(snapshot) {
+        const diff = snapshot?.diff || {};
+        return [
+            ...(diff.addedFriends || []).map((id) => ({ kind: 'add', text: `friend ${displayUserId(id)}` })),
+            ...(diff.removedFriends || []).map((id) => ({ kind: 'remove', text: `friend ${displayUserId(id)}` })),
+            ...(diff.addedEdges || []).map(({ friendId, mutualId }) => ({
+                kind: 'add',
+                text: `${displayUserId(friendId)} -> ${displayUserId(mutualId)}`
+            })),
+            ...(diff.removedEdges || []).map(({ friendId, mutualId }) => ({
+                kind: 'remove',
+                text: `${displayUserId(friendId)} -> ${displayUserId(mutualId)}`
+            }))
+        ];
+    }
+
+    async function handleMutualNetworkRefresh() {
+        const previousLatestId = networkSnapshots.value[0]?.id || null;
+        const followLatest = !selectedSnapshotId.value || selectedSnapshotId.value === previousLatestId;
+        const history = await loadNetworkSnapshots();
+        if (followLatest && history.length) await restoreSnapshot(history[0].id);
+    }
 
     const EXCLUDED_FRIENDS_KEY = 'VRCX_MutualGraphExcludedFriends';
     const excludedFriendIds = useLocalStorage(EXCLUDED_FRIENDS_KEY, []);
@@ -632,6 +815,7 @@
 
     onMounted(() => {
         loadLayoutSettings();
+        window.addEventListener('vrcx:mutual-network-refresh', handleMutualNetworkRefresh);
         nextTick(() => {
             if (!graphContainerRef.value) return;
 
@@ -648,6 +832,7 @@
     });
 
     onBeforeUnmount(() => {
+        window.removeEventListener('vrcx:mutual-network-refresh', handleMutualNetworkRefresh);
         if (resizeObserver) {
             resizeObserver.disconnect();
             resizeObserver = null;
@@ -948,7 +1133,9 @@
             try {
                 const cam = sigmaInstance.getCamera?.();
                 cameraState = cam?.getState?.() || null;
-            } catch (e) {}
+            } catch {
+                // Camera restoration is best effort across graph recreation.
+            }
             sigmaInstance.kill();
             sigmaInstance = null;
         }
@@ -1030,7 +1217,9 @@
             try {
                 const cam = sigmaInstance.getCamera?.();
                 cam?.setState?.(cameraState);
-            } catch (e) {}
+            } catch {
+                // Camera restoration is best effort across graph recreation.
+            }
         }
 
         let hovered = null;
@@ -1153,6 +1342,24 @@
         // loadingToastId.value = toast.info(t('view.charts.mutual_friend.status.loading_cache'));
 
         try {
+            const history = await loadNetworkSnapshots();
+            if (history.length) {
+                const [version, meta] = await Promise.all([
+                    getMutualNetworkSnapshot(history[0].id),
+                    database.getMutualGraphMeta()
+                ]);
+                graphMeta.value = meta;
+                selectedSnapshotId.value = version.id;
+                const mutualMap = snapshotToMutualMap(version.snapshot);
+                if (mutualMap.size) {
+                    await applyGraph(mutualMap);
+                    chartsStore.markMutualGraphLoaded({ notify: false });
+                    fetchState.processedFriends = Math.min(mutualMap.size, totalFriends.value || mutualMap.size);
+                    status.friendSignature = version.friendCount;
+                    status.needsRefetch = false;
+                    return;
+                }
+            }
             const [snapshot, meta] = await Promise.all([
                 database.getMutualGraphSnapshot(),
                 database.getMutualGraphMeta()
@@ -1174,7 +1381,7 @@
 
             const mutualMap = new Map();
             snapshot.forEach((mutualIds, friendId) => {
-                if (!friendId) return;
+                if (!friendId || friendId === EMPTY_USER_ID) return;
                 const friendEntry = friends.value?.get ? friends.value.get(friendId) : undefined;
                 const fallbackRef = friendEntry?.ref || cachedUsers.get(friendId);
 
@@ -1238,12 +1445,16 @@
 
     async function startFetch() {
         if (isFetching.value || isOptOut.value) return;
-        const mutualMap = await chartsStore.fetchMutualGraph();
-        if (!mutualMap) return;
+        isFetching.value = true;
         try {
-            await applyGraph(mutualMap);
+            await refreshMutualNetwork();
+            const history = await loadNetworkSnapshots();
+            if (history.length) await restoreSnapshot(history[0].id);
         } catch (err) {
-            console.error('[MutualNetworkGraph] Failed to apply graph after fetch', err);
+            console.error('[MutualNetworkGraph] Failed to refresh graph', err);
+            toast.error(t('view.charts.mutual_friend.context_menu.refresh_error'));
+        } finally {
+            isFetching.value = false;
         }
     }
 
@@ -1323,7 +1534,7 @@
             if (snapshot && snapshot.size > 0) {
                 const mutualMap = new Map();
                 snapshot.forEach((mutualIds, fId) => {
-                    if (!fId) return;
+                    if (!fId || fId === EMPTY_USER_ID) return;
                     const friendEntry = friends.value?.get ? friends.value.get(fId) : undefined;
                     const fallbackRef = friendEntry?.ref || cachedUsers.get(fId);
                     let normalizedMutuals = Array.isArray(mutualIds) ? mutualIds : [];
