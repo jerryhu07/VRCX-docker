@@ -142,7 +142,56 @@ test('watch list mutual fetch paginates and sorts snapshots by user ID', async (
 
     assert.deepEqual(calls, [0, 100]);
     assert.equal(mutuals.length, 101);
-    assert.equal(mutuals[0].displayName, 'First');
+    assert.deepEqual(mutuals[0], { id: `usr_${'0'.repeat(36)}` });
+});
+
+test('mutual snapshots ignore metadata, duplicates and order but retain membership changes', async () => {
+    const session = createSession();
+    const before = [{ id: 'usr_a', status: 'online', avatar: 'old' }, { id: 'usr_b' }];
+    session.sqliteNonQuery = async () => assert.fail('metadata created a history row');
+    assert.equal(await session.recordWatchSnapshot('owner', 'user', 'mutuals', JSON.stringify(before),
+        [{ id: 'usr_b', status: 'offline' }, { id: 'usr_a', avatar: 'new' }, { id: 'usr_a' }]), false);
+    let saved;
+    session.sqliteNonQuery = async (_sql, args) => { saved = args; };
+    assert.equal(await session.recordWatchSnapshot('owner', 'user', 'mutuals', JSON.stringify(before),
+        [{ id: 'usr_c', avatar: 'new' }, { id: 'usr_b' }]), true);
+    assert.deepEqual(JSON.parse(saved['@snapshot_json']), [{ id: 'usr_b' }, { id: 'usr_c' }]);
+    assert.deepEqual(JSON.parse(saved['@diff_json']), [
+        { op: 'remove', path: '$.usr_a', before: { id: 'usr_a' } },
+        { op: 'add', path: '$.usr_c', after: { id: 'usr_c' } }
+    ]);
+    await session.recordWatchSnapshot('owner', 'user', 'mutuals', JSON.stringify(before), []);
+    assert.equal(JSON.parse(saved['@diff_json']).length, 2);
+});
+
+test('mutual history migration preserves membership history and removes metadata-only rows once', async () => {
+    const session = createSession();
+    let done = '';
+    const writes = [];
+    const snapshots = [[{ id: 'usr_a', avatar: 'old' }], [{ id: 'usr_a', avatar: 'new' }], []];
+    session.configGet = async () => done;
+    session.configSet = async (_key, value) => { done = value; };
+    session.sqliteExecute = async (sql) => sql.includes('headless_watch_changes')
+        ? snapshots.map((s, i) => [i + 1, 'owner', 'user', JSON.stringify(s)])
+        : [['owner', 'user', JSON.stringify(snapshots[1])]];
+    session.sqliteNonQuery = async (sql, args) => writes.push([sql, args]);
+    await session.migrateWatchMutualHistory();
+    assert.equal(writes[0][0], 'BEGIN');
+    assert.equal(writes.at(-1)[0], 'COMMIT');
+    const removed = writes.filter(([sql]) => sql.startsWith('DELETE'));
+    assert.deepEqual(removed.map(([, args]) => args['@id']), [2]);
+    const changes = writes.filter(([sql]) => sql.startsWith('UPDATE headless_watch_changes'));
+    assert.deepEqual(JSON.parse(changes[0][1]['@snapshot']), [{ id: 'usr_a' }]);
+    assert.deepEqual(JSON.parse(changes[1][1]['@diff']), [{ op: 'remove', path: '$.usr_a', before: { id: 'usr_a' } }]);
+    const count = writes.length;
+    await session.migrateWatchMutualHistory();
+    assert.equal(writes.length, count);
+});
+
+test('invalid mutual payload is an error rather than an empty membership snapshot', async () => {
+    const session = createSession();
+    session.vrchatRequest = async () => ({ error: 'temporary failure' });
+    await assert.rejects(session.fetchWatchMutualFriends('user'), /Invalid mutual friends response/);
 });
 
 test('watch list treats SQLite null placeholders as missing snapshots', async () => {

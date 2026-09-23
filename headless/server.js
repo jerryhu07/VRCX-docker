@@ -157,6 +157,13 @@ function canonicalizeJson(value) {
 }
 
 function canonicalizeWatchSnapshot(snapshot, source = '') {
+    if (source === 'mutuals' && Array.isArray(snapshot)) {
+        return [...new Set(snapshot.map((entry) =>
+            typeof entry === 'string' ? entry : entry?.id
+        ).filter((id) => typeof id === 'string' && id))]
+            .sort()
+            .map((id) => ({ id }));
+    }
     const normalized = canonicalizeJson(snapshot);
     if (
         source !== 'profile' ||
@@ -169,6 +176,16 @@ function canonicalizeWatchSnapshot(snapshot, source = '') {
     }
     const { avatarName, ...profile } = normalized;
     return { ...profile, avatarName };
+}
+
+function buildWatchSnapshotDiff(previous, next, source) {
+    const normalize = (value) => {
+        const snapshot = canonicalizeWatchSnapshot(value, source);
+        return source === 'mutuals' && Array.isArray(snapshot)
+            ? Object.fromEntries(snapshot.map((entry) => [entry.id, entry]))
+            : snapshot;
+    };
+    return buildJsonDiff(normalize(previous), normalize(next));
 }
 
 function buildJsonDiff(previous, next, path = '$', changes = []) {
@@ -696,6 +713,7 @@ class HeadlessSession {
 
     async init({ restoreSession = true } = {}) {
         await this.initGlobalTables();
+        await this.migrateWatchMutualHistory();
         await this.restoreLogStreamClients();
         await this.cookieJar.load();
         this.autoRecoveryDisabled =
@@ -2212,6 +2230,48 @@ class HeadlessSession {
         return this.currentUser.id;
     }
 
+    async migrateWatchMutualHistory() {
+        if (await this.configGet('watchMutualUidOnlyV1', '')) return;
+        await this.sqliteNonQuery('BEGIN');
+        try {
+            const rows = await this.sqliteExecute(
+                "SELECT id, owner_id, user_id, snapshot_json FROM headless_watch_changes WHERE source = 'mutuals' ORDER BY id"
+            );
+            const previous = new Map();
+            for (const [id, ownerId, userId, json] of rows) {
+                const snapshot = canonicalizeWatchSnapshot(parseMaybeJson(json), 'mutuals');
+                if (!Array.isArray(snapshot)) throw new Error('Invalid mutual friends history snapshot');
+                const key = `${ownerId}:${userId}`;
+                const diff = previous.has(key)
+                    ? buildWatchSnapshotDiff(previous.get(key), snapshot, 'mutuals')
+                    : [{ op: 'add', path: '$', after: snapshot }];
+                if (diff.length) {
+                    await this.sqliteNonQuery(
+                        'UPDATE headless_watch_changes SET snapshot_json = @snapshot, diff_json = @diff WHERE id = @id',
+                        { '@id': id, '@snapshot': JSON.stringify(snapshot), '@diff': JSON.stringify(diff) }
+                    );
+                } else {
+                    await this.sqliteNonQuery('DELETE FROM headless_watch_changes WHERE id = @id', { '@id': id });
+                }
+                previous.set(key, snapshot);
+            }
+            const users = await this.sqliteExecute('SELECT owner_id, user_id, mutuals_json FROM headless_watch_users');
+            for (const [ownerId, userId, json] of users) {
+                const snapshot = parseMaybeJson(json);
+                if (!Array.isArray(snapshot)) continue;
+                await this.sqliteNonQuery(
+                    'UPDATE headless_watch_users SET mutuals_json = @snapshot WHERE owner_id = @owner_id AND user_id = @user_id',
+                    { '@owner_id': ownerId, '@user_id': userId, '@snapshot': JSON.stringify(canonicalizeWatchSnapshot(snapshot, 'mutuals')) }
+                );
+            }
+            await this.configSet('watchMutualUidOnlyV1', 'true');
+            await this.sqliteNonQuery('COMMIT');
+        } catch (err) {
+            await this.sqliteNonQuery('ROLLBACK');
+            throw err;
+        }
+    }
+
     async listWatchUsers() {
         const ownerId = this.requireWatchListOwner();
         const rows = await this.sqliteExecute(
@@ -2357,15 +2417,11 @@ class HeadlessSession {
                     params: { n: 100, offset }
                 }
             );
-            if (!Array.isArray(page)) break;
+            if (!Array.isArray(page)) throw new Error('Invalid mutual friends response');
             mutuals.push(...page);
             if (page.length < 100) break;
         }
-        return mutuals
-            .map(canonicalizeJson)
-            .sort((a, b) =>
-                String(a?.id || '').localeCompare(String(b?.id || ''))
-            );
+        return canonicalizeWatchSnapshot(mutuals, 'mutuals');
     }
 
     async fetchWatchProfile(userId) {
@@ -2395,20 +2451,8 @@ class HeadlessSession {
         const previous = hasPreviousSnapshot
             ? parseMaybeJson(previousJson)
             : null;
-        const previousForDiff =
-            source === 'mutuals' && Array.isArray(previous)
-                ? Object.fromEntries(
-                      previous.map((entry) => [entry?.id || '', entry])
-                  )
-                : previous;
-        const nextForDiff =
-            source === 'mutuals' && Array.isArray(normalized)
-                ? Object.fromEntries(
-                      normalized.map((entry) => [entry?.id || '', entry])
-                  )
-                : normalized;
         const diff = hasPreviousSnapshot
-            ? buildJsonDiff(previousForDiff, nextForDiff)
+            ? buildWatchSnapshotDiff(previous, normalized, source)
             : [{ op: 'add', path: '$', after: normalized }];
         if (!diff.length) return false;
         const now = new Date().toJSON();
