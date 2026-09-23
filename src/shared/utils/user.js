@@ -196,6 +196,9 @@ function userImage(
     if (!user) {
         return '';
     }
+    if (user.iconUrl) {
+        return isIcon ? convertFileUrlToImageUrl(user.iconUrl) : user.iconUrl;
+    }
     if (
         (isUserDialogIcon && user.userIcon) ||
         (displayVRCPlusIconsAsAvatar && user.userIcon)
@@ -248,6 +251,9 @@ function userImage(
 function userImageFull(user, displayVRCPlusIconsAsAvatar = false) {
     if (!user) {
         return '';
+    }
+    if (user.iconUrl) {
+        return user.iconUrl;
     }
     if (displayVRCPlusIconsAsAvatar && user.userIcon) {
         return user.userIcon;

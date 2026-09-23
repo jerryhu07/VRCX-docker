@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global require, module, Buffer */
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -33,7 +34,8 @@ function parseArgs(argv) {
         historyMaxFiles: DEFAULT_HISTORY_MAX_FILES,
         launchVrchat: process.env.VRCX_LOG_STREAM_NO_LAUNCH !== '1',
         vrchatExe: process.env.VRCX_VRCHAT_EXE || '',
-        steamAppId: process.env.VRCX_VRCHAT_STEAM_APP_ID || DEFAULT_VRCHAT_STEAM_APP_ID,
+        steamAppId:
+            process.env.VRCX_VRCHAT_STEAM_APP_ID || DEFAULT_VRCHAT_STEAM_APP_ID,
         exitWithVrchat: process.env.VRCX_LOG_STREAM_EXIT_WITH_VRCHAT !== '0',
         vrchatExitGraceMs: 30000,
         singleInstance: process.env.VRCX_LOG_STREAM_SINGLE_INSTANCE !== '0',
@@ -56,22 +58,35 @@ function parseArgs(argv) {
         else if (arg.startsWith('--server')) setArg('server', readValue());
         else if (arg.startsWith('--token')) setArg('token', readValue());
         else if (arg.startsWith('--log-dir')) setArg('logDir', readValue());
-        else if (arg.startsWith('--machine-id')) setArg('machineId', readValue());
-        else if (arg.startsWith('--state-file')) setArg('stateFile', readValue());
-        else if (arg.startsWith('--batch-size')) setArg('batchSize', Number(readValue()));
-        else if (arg.startsWith('--poll-ms')) setArg('pollMs', Number(readValue()));
-        else if (arg.startsWith('--tail-bytes')) setArg('tailBytes', Number(readValue()));
-        else if (arg.startsWith('--history-mode')) setArg('historyMode', readValue());
-        else if (arg.startsWith('--history-max-days')) setArg('historyMaxDays', Number(readValue()));
-        else if (arg.startsWith('--history-max-files')) setArg('historyMaxFiles', Number(readValue()));
+        else if (arg.startsWith('--machine-id'))
+            setArg('machineId', readValue());
+        else if (arg.startsWith('--state-file'))
+            setArg('stateFile', readValue());
+        else if (arg.startsWith('--batch-size'))
+            setArg('batchSize', Number(readValue()));
+        else if (arg.startsWith('--poll-ms'))
+            setArg('pollMs', Number(readValue()));
+        else if (arg.startsWith('--tail-bytes'))
+            setArg('tailBytes', Number(readValue()));
+        else if (arg.startsWith('--history-mode'))
+            setArg('historyMode', readValue());
+        else if (arg.startsWith('--history-max-days'))
+            setArg('historyMaxDays', Number(readValue()));
+        else if (arg.startsWith('--history-max-files'))
+            setArg('historyMaxFiles', Number(readValue()));
         else if (arg === '--from-start') setArg('historyMode', 'backfill');
         else if (arg === '--skip-history') setArg('historyMode', 'skip');
         else if (arg === '--no-launch-vrchat') setArg('launchVrchat', false);
-        else if (arg.startsWith('--vrchat-exe')) setArg('vrchatExe', readValue());
-        else if (arg.startsWith('--steam-app-id')) setArg('steamAppId', readValue());
-        else if (arg === '--no-exit-with-vrchat') setArg('exitWithVrchat', false);
-        else if (arg.startsWith('--exit-grace-ms')) setArg('vrchatExitGraceMs', Number(readValue()));
-        else if (arg === '--no-single-instance') setArg('singleInstance', false);
+        else if (arg.startsWith('--vrchat-exe'))
+            setArg('vrchatExe', readValue());
+        else if (arg.startsWith('--steam-app-id'))
+            setArg('steamAppId', readValue());
+        else if (arg === '--no-exit-with-vrchat')
+            setArg('exitWithVrchat', false);
+        else if (arg.startsWith('--exit-grace-ms'))
+            setArg('vrchatExitGraceMs', Number(readValue()));
+        else if (arg === '--no-single-instance')
+            setArg('singleInstance', false);
     }
     return args;
 }
@@ -102,7 +117,9 @@ Options:
 }
 
 function defaultConfigFile() {
-    const exeDir = path.dirname(process.execPath || process.argv[1] || process.cwd());
+    const exeDir = path.dirname(
+        process.execPath || process.argv[1] || process.cwd()
+    );
     const exeConfig = path.join(exeDir, 'vrcx-log-streamer.config.json');
     if (fs.existsSync(exeConfig)) return exeConfig;
     const cwdConfig = path.join(process.cwd(), 'vrcx-log-streamer.config.json');
@@ -115,7 +132,9 @@ function loadConfig(file) {
     try {
         return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (err) {
-        throw new Error(`Failed to read config file ${file}: ${err.message}`);
+        throw new Error(`Failed to read config file ${file}: ${err.message}`, {
+            cause: err
+        });
     }
 }
 
@@ -137,7 +156,10 @@ function applyConfig(args, config) {
 }
 
 function acquireSingleInstanceLock(machineId) {
-    const lockPath = path.join(os.tmpdir(), `vrcx-log-streamer-${machineId}.lock`);
+    const lockPath = path.join(
+        os.tmpdir(),
+        `vrcx-log-streamer-${machineId}.lock`
+    );
     let fd;
     try {
         fd = fs.openSync(lockPath, 'wx');
@@ -208,7 +230,8 @@ function loadState(file) {
 
 function saveState(file, state) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(state, null, 2));
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(state, null, 2));
+    fs.renameSync(`${file}.tmp`, file);
 }
 
 function normalizeServer(server) {
@@ -321,9 +344,13 @@ function isVrchatRunning() {
             );
             return;
         }
-        childProcess.exec('pgrep -f VRChat', { timeout: 5000 }, (err, stdout) => {
-            resolve(!err && !!String(stdout || '').trim());
-        });
+        childProcess.exec(
+            'pgrep -f VRChat',
+            { timeout: 5000 },
+            (err, stdout) => {
+                resolve(!err && !!String(stdout || '').trim());
+            }
+        );
     });
 }
 
@@ -331,7 +358,10 @@ function logFiles(logDir) {
     try {
         return fs
             .readdirSync(logDir, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && /^output_log_.*\.txt$/i.test(entry.name))
+            .filter(
+                (entry) =>
+                    entry.isFile() && /^output_log_.*\.txt$/i.test(entry.name)
+            )
             .map((entry) => {
                 const filePath = path.join(logDir, entry.name);
                 const stat = fs.statSync(filePath);
@@ -343,9 +373,16 @@ function logFiles(logDir) {
                     birthtimeMs: stat.birthtimeMs || stat.mtimeMs
                 };
             })
-            .sort((a, b) => a.birthtimeMs - b.birthtimeMs || a.name.localeCompare(b.name));
+            .sort(
+                (a, b) =>
+                    a.birthtimeMs - b.birthtimeMs ||
+                    a.name.localeCompare(b.name)
+            );
     } catch (err) {
-        throw new Error(`Cannot read VRChat log directory: ${logDir}: ${err.message}`);
+        throw new Error(
+            `Cannot read VRChat log directory: ${logDir}: ${err.message}`,
+            { cause: err }
+        );
     }
 }
 
@@ -419,13 +456,25 @@ function parseLine(fileName, line, context) {
         const index = line.lastIndexOf('] Joining ');
         if (index < 0) return null;
         const location = cleanLocation(line.slice(index + 10));
-        return rawEvent(fileName, loggedAt, 'location', [location, context.recentWorldName || ''], line);
+        return rawEvent(
+            fileName,
+            loggedAt,
+            'location',
+            [location, context.recentWorldName || ''],
+            line
+        );
     }
 
     if (line.includes('[Behaviour] OnLeftRoom')) {
         const destination = context.locationDestination || '';
         context.locationDestination = '';
-        return rawEvent(fileName, loggedAt, 'location-destination', [destination], line);
+        return rawEvent(
+            fileName,
+            loggedAt,
+            'location-destination',
+            [destination],
+            line
+        );
     }
 
     if (line.includes('[Behaviour] Destination fetching: ')) {
@@ -478,7 +527,9 @@ function parseLine(fileName, line, context) {
         return rawEvent(fileName, loggedAt, 'portal-spawn', [], line);
     }
 
-    if (line.includes('Maximum number (384) of shader global keywords exceeded')) {
+    if (
+        line.includes('Maximum number (384) of shader global keywords exceeded')
+    ) {
         if (context.shaderKeywordsLimitReached) return null;
         context.shaderKeywordsLimitReached = true;
         return rawEvent(
@@ -493,7 +544,13 @@ function parseLine(fileName, line, context) {
     if (line.includes('[VRC Camera] Took screenshot to: ')) {
         const index = line.lastIndexOf('] Took screenshot to: ');
         if (index < 0) return null;
-        return rawEvent(fileName, loggedAt, 'screenshot', [line.slice(index + 22)], line);
+        return rawEvent(
+            fileName,
+            loggedAt,
+            'screenshot',
+            [line.slice(index + 22)],
+            line
+        );
     }
 
     return null;
@@ -513,18 +570,28 @@ function rawEvent(fileName, loggedAt, type, args, rawLine) {
 
 async function readLines(file, startOffset, onLine) {
     let offset = startOffset;
+    if (startOffset >= file.size) return offset;
     const stream = fs.createReadStream(file.path, {
-        encoding: 'utf8',
-        start: startOffset
+        start: startOffset,
+        end: file.size - 1
     });
-    const rl = readline.createInterface({
-        input: stream,
-        crlfDelay: Infinity
-    });
-    for await (const line of rl) {
-        const lineBytes = Buffer.byteLength(`${line}\n`, 'utf8');
-        offset += lineBytes;
-        await onLine(line, offset);
+    let remainder = Buffer.alloc(0);
+    // Checkpoints are byte positions, including CRLF. Wait for a complete line.
+    for await (const chunk of stream) {
+        const bytes = Buffer.concat([remainder, chunk]);
+        let start = 0;
+        let end;
+        while ((end = bytes.indexOf(10, start)) !== -1) {
+            const lineEnd =
+                end > start && bytes[end - 1] === 13 ? end - 1 : end;
+            offset += end + 1 - start;
+            await onLine(
+                bytes.subarray(start, lineEnd).toString('utf8'),
+                offset
+            );
+            start = end + 1;
+        }
+        remainder = bytes.subarray(start);
     }
     return offset;
 }
@@ -547,6 +614,7 @@ class Streamer {
         this.lastHeartbeat = 0;
         this.historyMode = String(args.historyMode || 'ask').toLowerCase();
         this.historyEligible = new Set();
+        this.startupFiles = new Set();
         this.vrchatSeenRunning = false;
         this.vrchatLastSeenAt = 0;
     }
@@ -564,6 +632,7 @@ class Streamer {
 
     async resolveHistoryMode() {
         const files = logFiles(this.logDir);
+        this.startupFiles = new Set(files.map((file) => file.name));
         const uninitialized = files.filter(
             (file) => !this.state.files[file.name]?.initialized
         );
@@ -628,15 +697,21 @@ class Streamer {
             this.handleMessage(data.toString('utf8'));
         });
         ws.on('close', () => {
-            if (this.connected) console.log('Disconnected from headless backend');
+            if (this.connected)
+                console.log('Disconnected from headless backend');
             this.connected = false;
             this.connecting = false;
             this.ws = null;
+            for (const events of this.inflight.values()) {
+                this.pending.unshift(...events);
+            }
+            this.inflight.clear();
             setTimeout(() => this.connect(), 5000).unref?.();
         });
         ws.on('error', (err) => {
             this.connecting = false;
-            if (!this.connected) console.error(`Connect failed: ${err.message}`);
+            if (!this.connected)
+                console.error(`Connect failed: ${err.message}`);
         });
     }
 
@@ -648,7 +723,11 @@ class Streamer {
                     this.vrchatSeenRunning = true;
                     this.vrchatLastSeenAt = Date.now();
                 }
-                if (!this.args.launchVrchat || running || this.vrchatSeenRunning) {
+                if (
+                    !this.args.launchVrchat ||
+                    running ||
+                    this.vrchatSeenRunning
+                ) {
                     await this.scan();
                 }
                 this.flush();
@@ -657,7 +736,8 @@ class Streamer {
                     this.args.exitWithVrchat &&
                     this.vrchatSeenRunning &&
                     !running &&
-                    Date.now() - this.vrchatLastSeenAt > this.args.vrchatExitGraceMs
+                    Date.now() - this.vrchatLastSeenAt >
+                        this.args.vrchatExitGraceMs
                 ) {
                     console.log('VRChat exited; stopping log streamer');
                     this.stopped = true;
@@ -667,11 +747,14 @@ class Streamer {
             } catch (err) {
                 console.error(err.message || err);
             }
-            await new Promise((resolve) => setTimeout(resolve, this.args.pollMs));
+            await new Promise((resolve) =>
+                setTimeout(resolve, this.args.pollMs)
+            );
         }
     }
 
     async scan() {
+        if (this.pending.length || this.inflight.size) return;
         const files = logFiles(this.logDir);
         for (const file of files) {
             const saved = this.state.files[file.name] || {};
@@ -679,9 +762,16 @@ class Streamer {
                 ? this.readOffsets.get(file.name)
                 : Number(saved.offset || 0);
             if (!saved.initialized) {
-                if (this.historyMode === 'backfill' && this.historyEligible.has(file.name)) {
+                if (
+                    !this.startupFiles.has(file.name) ||
+                    (this.historyMode === 'backfill' &&
+                        this.historyEligible.has(file.name))
+                ) {
                     offset = 0;
-                } else if (this.historyMode === 'tail' && this.historyEligible.has(file.name)) {
+                } else if (
+                    this.historyMode === 'tail' &&
+                    this.historyEligible.has(file.name)
+                ) {
                     offset = Math.max(0, file.size - this.args.tailBytes);
                 } else {
                     offset = file.size;
@@ -693,30 +783,57 @@ class Streamer {
                 };
                 saveState(this.stateFile, this.state);
             }
-            if (file.size < offset) offset = 0;
+            if (file.size < offset) {
+                offset = 0;
+                this.state.files[file.name].offset = 0;
+                this.contexts.delete(file.name);
+            }
             if (file.size <= offset) continue;
             const context = this.contexts.get(file.name) || {};
             this.contexts.set(file.name, context);
-            const finalOffset = await readLines(file, offset, async (line, nextOffset) => {
-                const event = parseLine(file.name, line, context);
-                if (!event) return;
-                event.file = file.name;
-                event.offset = nextOffset;
-                event.clientEventId = crypto
-                    .createHash('sha256')
-                    .update(
-                        JSON.stringify([
-                            this.args.machineId,
-                            file.name,
-                            nextOffset,
-                            event.raw
-                        ])
-                    )
-                    .digest('hex');
-                this.pending.push(event);
-            });
+            const finalOffset = await readLines(
+                file,
+                offset,
+                async (line, nextOffset) => {
+                    const event = parseLine(file.name, line, context);
+                    if (!event) return;
+                    event.file = file.name;
+                    event.offset = nextOffset;
+                    event.clientEventId = crypto
+                        .createHash('sha256')
+                        .update(
+                            JSON.stringify([
+                                this.args.machineId,
+                                file.name,
+                                nextOffset,
+                                event.raw
+                            ])
+                        )
+                        .digest('hex');
+                    this.pending.push(event);
+                }
+            );
             this.readOffsets.set(file.name, finalOffset);
+            this.checkpointCompletedFile(file.name);
         }
+    }
+
+    checkpointCompletedFile(fileName) {
+        if (
+            this.pending.some((event) => event.file === fileName) ||
+            Array.from(this.inflight.values()).some((events) =>
+                events.some((event) => event.file === fileName)
+            )
+        )
+            return;
+        const offset = this.readOffsets.get(fileName);
+        if (
+            offset === undefined ||
+            this.state.files[fileName]?.offset === offset
+        )
+            return;
+        this.state.files[fileName] = { initialized: true, offset };
+        saveState(this.stateFile, this.state);
     }
 
     send(payload) {
@@ -726,27 +843,34 @@ class Streamer {
     }
 
     flush() {
-        if (!this.connected || !this.pending.length) return;
-        while (this.pending.length) {
-            const events = this.pending.splice(0, this.args.batchSize);
-            const batchId = crypto.randomUUID();
-            this.inflight.set(batchId, events);
-            if (
-                !this.send({
-                    type: 'events',
-                    batchId,
-                    machineId: this.args.machineId,
-                    events
-                })
-            ) {
-                this.pending.unshift(...events);
-                this.inflight.delete(batchId);
-                return;
-            }
+        if (!this.connected || !this.pending.length || this.inflight.size)
+            return;
+        const events = this.pending.splice(0, this.args.batchSize);
+        const batchId = crypto.randomUUID();
+        this.inflight.set(batchId, events);
+        this.sentAt = Date.now();
+        if (
+            !this.send({
+                type: 'events',
+                batchId,
+                machineId: this.args.machineId,
+                events
+            })
+        ) {
+            this.pending.unshift(...events);
+            this.inflight.delete(batchId);
         }
     }
 
     heartbeat() {
+        if (
+            this.connected &&
+            this.inflight.size &&
+            Date.now() - this.sentAt > 30000
+        ) {
+            this.ws.terminate();
+            return;
+        }
         if (!this.connected || Date.now() - this.lastHeartbeat < 15000) return;
         this.lastHeartbeat = Date.now();
         this.send({
@@ -763,22 +887,40 @@ class Streamer {
             return;
         }
         if (message.type === 'ack') {
-            const events = this.inflight.get(message.batchId) || [];
+            const events = this.inflight.get(message.batchId);
+            if (!events) return;
             this.inflight.delete(message.batchId);
-            for (const [fileName, offset] of Object.entries(message.checkpoints || {})) {
+            if (message.failed) {
+                this.pending.unshift(...events);
+                this.ws?.terminate();
+                return;
+            }
+            for (const [fileName, offset] of Object.entries(
+                message.checkpoints || {}
+            )) {
                 const fileState = this.state.files[fileName] || {};
-                fileState.offset = Math.max(Number(fileState.offset || 0), Number(offset || 0));
+                fileState.offset = Math.max(
+                    Number(fileState.offset || 0),
+                    Number(offset || 0)
+                );
                 fileState.initialized = true;
                 this.state.files[fileName] = fileState;
                 this.readOffsets.set(
                     fileName,
-                    Math.max(Number(this.readOffsets.get(fileName) || 0), fileState.offset)
+                    Math.max(
+                        Number(this.readOffsets.get(fileName) || 0),
+                        fileState.offset
+                    )
                 );
             }
             saveState(this.stateFile, this.state);
+            for (const fileName of new Set(events.map((event) => event.file))) {
+                this.checkpointCompletedFile(fileName);
+            }
             console.log(
                 `Ack ${message.batchId}: accepted=${message.accepted || 0} duplicate=${message.duplicate || 0} failed=${message.failed || 0} events=${events.length}`
             );
+            this.flush();
         } else if (message.type === 'error') {
             console.error(`Server error: ${message.error}`);
         }
@@ -809,14 +951,19 @@ async function main() {
     if (!Number.isFinite(args.historyMaxFiles) || args.historyMaxFiles < 0) {
         args.historyMaxFiles = DEFAULT_HISTORY_MAX_FILES;
     }
-    if (!Number.isFinite(args.vrchatExitGraceMs) || args.vrchatExitGraceMs < 0) {
+    if (
+        !Number.isFinite(args.vrchatExitGraceMs) ||
+        args.vrchatExitGraceMs < 0
+    ) {
         args.vrchatExitGraceMs = 30000;
     }
     let releaseLock = null;
     if (args.singleInstance) {
         releaseLock = acquireSingleInstanceLock(args.machineId);
         if (!releaseLock) {
-            console.log('Another VRCX log streamer process is already running; exiting.');
+            console.log(
+                'Another VRCX log streamer process is already running; exiting.'
+            );
             return;
         }
     }
@@ -836,7 +983,11 @@ async function main() {
     await streamer.start();
 }
 
-main().catch((err) => {
-    console.error(err.message || err);
-    process.exit(1);
-});
+module.exports = { Streamer, readLines, parseArgs };
+
+if (require.main === module || require('node:sea').isSea()) {
+    main().catch((err) => {
+        console.error(err.message || err);
+        process.exit(1);
+    });
+}

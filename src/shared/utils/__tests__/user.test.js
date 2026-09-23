@@ -447,6 +447,16 @@ describe('User Utils', () => {
     });
 
     describe('userImage (explicit settings)', () => {
+        test('uses the new profile iconUrl before legacy avatar fields', () => {
+            const user = {
+                iconUrl: 'https://img.com/profile',
+                userIcon: 'old',
+                currentAvatarImageUrl: 'old-avatar'
+            };
+            expect(userImage(user)).toBe(user.iconUrl);
+            expect(userImage(user, true)).toBe(`converted:${user.iconUrl}`);
+            expect(userImageFull(user)).toBe(user.iconUrl);
+        });
         test('does not access appearance store when setting is passed (pure path)', () => {
             userImage(
                 { thumbnailUrl: 'https://img.com/thumb' },

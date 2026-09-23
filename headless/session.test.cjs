@@ -199,6 +199,68 @@ function createSession() {
     return session;
 }
 
+test('user requests combine upstream public profile fields and reject partial fetch failures', async (t) => {
+    const session = createSession();
+    const id = 'usr_11111111-1111-1111-1111-111111111111';
+    const requested = [];
+    let profileStatus = 200;
+    t.mock.method(globalThis, 'fetch', async (url) => {
+        const isProfile = url.includes('/profile/');
+        requested.push(url);
+        return new Response(JSON.stringify(isProfile
+            ? (profileStatus === 200 ? { id, bio: '', bioLinks: ['https://example.com'], iconUrl: 'icon' }
+                : { error: { message: 'Temporarily unavailable' } })
+            : { id, displayName: 'Alice', location: 'private' }), {
+            status: isProfile ? profileStatus : 200,
+            headers: { 'content-type': 'application/json' }
+        });
+    });
+    const user = await session.vrchatRequest(`users/${id}`);
+    assert.equal(user.bio, '');
+    assert.equal(user.location, 'private');
+    assert.equal(user.iconUrl, 'icon');
+    assert.deepEqual(user.bioLinks, ['https://example.com']);
+    assert.equal(requested.length, 2);
+    profileStatus = 503;
+    await assert.rejects(session.fetchWatchProfile(id), { status: 503 });
+});
+
+test('old duplicate log events acknowledge progress without replacing latest activity', async () => {
+    const session = createSession();
+    session.persistLogStreamClient = async () => {};
+    session.persistLogStreamEvent = async (_machineId, event) => event.id !== 'duplicate';
+    session.applyLogStreamEvent = async () => false;
+    const client = session.getLogStreamClient('test');
+    client.currentFile = 'new.txt';
+    client.lastEventAt = '2026-09-23T00:00:00.000Z';
+    client.fileOffset = 123;
+    const result = await session.handleLogStreamEvents('test', [{
+        id: 'duplicate', file: 'old.txt', offset: 99999, loggedAt: '2026-08-01T00:00:00.000Z'
+    }]);
+    assert.equal(result.duplicate, 1);
+    assert.equal(result.checkpoints['old.txt'], 99999);
+    assert.equal(client.currentFile, 'new.txt');
+    assert.equal(client.fileOffset, 123);
+    await session.handleLogStreamEvents('test', [{
+        id: 'new', file: 'newer.txt', offset: 20, loggedAt: '2026-09-23T00:01:00.000Z'
+    }]);
+    assert.equal(client.fileOffset, 20);
+    assert.equal(client.currentFile, 'newer.txt');
+});
+
+test('log stream status restores the latest stored event rather than a replayed summary', async () => {
+    const session = createSession();
+    session.sqliteExecute = async (sql) => sql.includes('FROM headless_log_stream_clients')
+        ? [['test', '', 10, 100, 0]]
+        : [['new.txt', 42, '2026-09-23T00:00:00.000Z']];
+    await session.restoreLogStreamClients();
+    const client = session.getLogStreamClient('test');
+    assert.equal(client.currentFile, 'new.txt');
+    assert.equal(client.lastEventAt, '2026-09-23T00:00:00.000Z');
+    assert.equal(client.acceptedCount, 10);
+    assert.equal(client.connected, false);
+});
+
 test('a fresh login stops an old authenticated session before awaiting 2FA', async () => {
     const session = createSession();
     let pipelineClosed = false;

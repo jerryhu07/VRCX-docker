@@ -696,6 +696,7 @@ class HeadlessSession {
 
     async init({ restoreSession = true } = {}) {
         await this.initGlobalTables();
+        await this.restoreLogStreamClients();
         await this.cookieJar.load();
         this.autoRecoveryDisabled =
             (await this.configGet('headlessAutoRecoveryDisabled', 'false')) ===
@@ -1083,6 +1084,18 @@ class HeadlessSession {
         }
 
         if (response.status === 200 && !data.startsWith('data:')) {
+            const endpoint = this.apiEndpointFromUrl(options.url);
+            const userMatch = endpoint?.match(/^users\/(usr_[^/]+)$/);
+            if (init.method === 'GET' && userMatch) {
+                // VRCX upstream f4441e8c / defa27fc: public profile fields moved
+                // to /profile. Merge here so browser and background jobs agree.
+                const user = parseMaybeJson(data);
+                const profile = await this.vrchatRequest(`profile/${userMatch[1]}`);
+                if (!user?.id || profile?.id !== user.id) {
+                    throw new Error('VRChat returned an invalid public profile');
+                }
+                data = JSON.stringify({ ...user, ...profile });
+            }
             data = this.augmentApiResponse(options.url, data);
         }
 
@@ -2360,7 +2373,9 @@ class HeadlessSession {
         const avatarInfo = await this.getAvatarInfo(
             profile?.currentAvatarImageUrl ||
                 profile?.currentAvatarThumbnailImageUrl ||
-                ''
+                profile?.iconUrl ||
+                '',
+            profile?.currentAvatarName || ''
         );
         return canonicalizeWatchSnapshot(
             {
@@ -4029,6 +4044,29 @@ class HeadlessSession {
         return !!token && [bearer, queryToken, bodyToken].includes(token);
     }
 
+    async restoreLogStreamClients() {
+        const rows = await this.sqliteExecute(
+            'SELECT machine_id, last_seen_at, accepted_count, duplicate_count, failed_count FROM headless_log_stream_clients'
+        );
+        for (const [machineId, lastSeenAt, accepted, duplicate, failed] of rows) {
+            const client = this.getLogStreamClient(machineId);
+            client.lastSeenAt = lastSeenAt || '';
+            client.acceptedCount = Number(accepted) || 0;
+            client.duplicateCount = Number(duplicate) || 0;
+            client.failedCount = Number(failed) || 0;
+            // Older clients could overwrite this summary by replaying history.
+            const [latest] = await this.sqliteExecute(
+                'SELECT file_name, file_offset, logged_at FROM headless_log_stream_events WHERE machine_id = @machine_id ORDER BY logged_at DESC, file_offset DESC LIMIT 1',
+                { '@machine_id': client.machineId }
+            );
+            if (latest) {
+                client.currentFile = latest[0];
+                client.fileOffset = Number(latest[1]) || 0;
+                client.lastEventAt = latest[2];
+            }
+        }
+    }
+
     getLogStreamClient(machineId) {
         const key = String(machineId || 'default').trim() || 'default';
         if (!this.logStreamClients.has(key)) {
@@ -4171,16 +4209,15 @@ class HeadlessSession {
                 if (fileName && fileOffset > (checkpoints[fileName] || 0)) {
                     checkpoints[fileName] = fileOffset;
                 }
-                client.currentFile = fileName || client.currentFile || '';
-                client.fileOffset = Math.max(
-                    client.fileOffset || 0,
-                    fileOffset || 0
-                );
-                client.lastEventAt =
-                    event.loggedAt || event.dt || new Date().toJSON();
                 if (!inserted) {
                     duplicate++;
                     continue;
+                }
+                const loggedAt = event.loggedAt || event.dt || new Date().toJSON();
+                if (!client.lastEventAt || loggedAt >= client.lastEventAt) {
+                    client.currentFile = fileName;
+                    client.fileOffset = fileOffset;
+                    client.lastEventAt = loggedAt;
                 }
                 accepted++;
                 if (await this.applyLogStreamEvent(machineId, event)) {

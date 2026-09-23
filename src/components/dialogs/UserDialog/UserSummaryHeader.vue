@@ -5,12 +5,18 @@
                 v-if="
                     !userDialog.loading &&
                     !profileImageError &&
-                    (userDialog.ref.profilePicOverrideThumbnail || userDialog.ref.profilePicOverride)
+                    (userDialog.ref.iconUrl ||
+                        userDialog.ref.profilePicOverrideThumbnail ||
+                        userDialog.ref.profilePicOverride)
                 "
                 class="cursor-pointer"
-                :src="userDialog.ref.profilePicOverrideThumbnail || userDialog.ref.profilePicOverride"
+                :src="
+                    userDialog.ref.iconUrl ||
+                    userDialog.ref.profilePicOverrideThumbnail ||
+                    userDialog.ref.profilePicOverride
+                "
                 style="height: 120px; width: 213.33px; border-radius: var(--radius-xl); object-fit: cover"
-                @click="showFullscreenImageDialog(userDialog.ref.profilePicOverride)"
+                @click="showFullscreenImageDialog(userDialog.ref.iconUrl || userDialog.ref.profilePicOverride)"
                 @error="profileImageError = true"
                 loading="lazy" />
             <img
@@ -263,7 +269,7 @@
 
 <script setup>
     import { Apple, ChevronDown, IdCard, Image, Monitor, Shield, Smartphone, UserPlus, Users } from 'lucide-vue-next';
-    import { computed, ref, watch } from 'vue';
+    import { ref, watch } from 'vue';
     import { storeToRefs } from 'pinia';
     import { useI18n } from 'vue-i18n';
 
