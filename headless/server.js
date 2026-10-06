@@ -8,6 +8,8 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const WebSocketClient = require('ws');
 const schemas = require('./schema.json');
+const { installerConfigTrailer } = require('./installerConfig.cjs');
+const { validateLogClientSettings } = require('./logClientSettings.cjs');
 const { WebSocketServer } = WebSocketClient;
 
 const rootDir = path.resolve(__dirname, '..');
@@ -721,10 +723,12 @@ class HeadlessSession {
         this.startedAt = new Date().toJSON();
         this.cookieJar = new CookieJar(this);
         this.logStreamToken = process.env.VRCX_LOG_STREAM_TOKEN || '';
+        this.logStreamAuthGeneration = 0;
     }
 
     async init({ restoreSession = true } = {}) {
         await this.initGlobalTables();
+        await this.getLogStreamToken();
         await this.migrateWatchMutualHistory();
         await this.restoreLogStreamClients();
         await this.cookieJar.load();
@@ -773,7 +777,7 @@ class HeadlessSession {
                 clients: Array.from(this.logStreamClients.values()).map(
                     (client) => ({
                         machineId: client.machineId,
-                        connected: !!client.connected,
+                        connected: !!client.connected && Date.now() - (Date.parse(client.lastSeenAt) || 0) < 45000,
                         lastSeenAt: client.lastSeenAt || '',
                         lastEventAt: client.lastEventAt || '',
                         currentFile: client.currentFile || '',
@@ -781,7 +785,13 @@ class HeadlessSession {
                         acceptedCount: client.acceptedCount || 0,
                         duplicateCount: client.duplicateCount || 0,
                         failedCount: client.failedCount || 0,
-                        lastError: client.lastError || ''
+                        lastError: client.lastError || '',
+                        clientVersion: client.clientVersion || '',
+                        platform: client.platform || '',
+                        vrchatRunning: typeof client.vrchatRunning === 'boolean' ? client.vrchatRunning : null,
+                        debugLoggingEnabled: typeof client.debugLoggingEnabled === 'boolean' ? client.debugLoggingEnabled : null,
+                        statusError: client.statusError || '',
+                        capabilities: client.capabilities || {}
                     })
                 )
             }
@@ -4269,6 +4279,13 @@ class HeadlessSession {
     }
 
     async getLogStreamToken() {
+        if (!this.logStreamTokenReady) {
+            if (!this.logStreamTokenLoading) this.logStreamTokenLoading = this.configGet('logStreamTokenOverride', '').then((override) => {
+                if (override) this.logStreamToken = override;
+                this.logStreamTokenReady = true;
+            }).finally(() => { this.logStreamTokenLoading = null; });
+            await this.logStreamTokenLoading;
+        }
         if (this.logStreamToken) return this.logStreamToken;
         const existing = await this.configGet('logStreamToken', '');
         if (existing) {
@@ -4279,6 +4296,30 @@ class HeadlessSession {
         await this.configSet('logStreamToken', token);
         this.logStreamToken = token;
         return token;
+    }
+
+    async rotateLogStreamToken() {
+        if (this.logStreamTokenRotation) return this.logStreamTokenRotation;
+        this.logStreamTokenRotation = (async () => {
+            await this.getLogStreamToken();
+            const token = crypto.randomBytes(32).toString('base64url');
+            await this.configSet('logStreamTokenOverride', token);
+            this.logStreamToken = token;
+            this.logStreamAuthGeneration++;
+            for (const client of this.logStreamClients.values()) {
+                client.connected = false;
+                for (const socket of client.sockets) { socket.close(1008, 'Log stream token rotated'); socket.terminate?.(); }
+            }
+            this.broadcast({ type: 'state', state: this.state() });
+            return token;
+        })().finally(() => { this.logStreamTokenRotation = null; });
+        return this.logStreamTokenRotation;
+    }
+
+    async saveLogClientSettings(input) {
+        const settings = validateLogClientSettings(input);
+        await this.configSet('logStreamClientSettings', JSON.stringify(settings));
+        return settings;
     }
 
     async isLogStreamAuthorized(req, body = null, url = null) {
@@ -4332,7 +4373,8 @@ class HeadlessSession {
                 currentLocationCreatedAt: '',
                 currentWorldName: '',
                 destinationLocation: '',
-                players: new Map()
+                players: new Map(),
+                sockets: new Set()
             });
         }
         return this.logStreamClients.get(key);
@@ -4368,20 +4410,25 @@ class HeadlessSession {
     }
 
     async handleLogStreamConnection(socket, req, url) {
-        if (!(await this.isLogStreamAuthorized(req, null, url))) {
+        const generation = this.logStreamAuthGeneration;
+        if (!(await this.isLogStreamAuthorized(req, null, url)) || generation !== this.logStreamAuthGeneration) {
             socket.close(1008, 'Unauthorized');
             return;
         }
 
         let machineId = url.searchParams.get('machineId') || 'default';
+        const connectionClient = this.getLogStreamClient(machineId);
+        connectionClient.sockets.add(socket);
         await this.updateLogStreamClient(machineId, { connected: true });
 
         socket.on('message', async (data) => {
             try {
+                if (generation !== this.logStreamAuthGeneration) { socket.close(1008, 'Log stream token rotated'); return; }
                 const message = JSON.parse(data.toString('utf8'));
-                if (message.machineId) machineId = String(message.machineId);
+                if (message.machineId && String(message.machineId) !== machineId) throw new Error('Client ID cannot change within a connection');
                 const client = this.getLogStreamClient(machineId);
                 if (message.type === 'hello' || message.type === 'heartbeat') {
+                    if (message.status) this.applyClientStatus(client, message.status);
                     client.connected = true;
                     client.currentFile =
                         message.currentFile || client.currentFile || '';
@@ -4430,8 +4477,32 @@ class HeadlessSession {
         });
 
         socket.on('close', async () => {
-            await this.updateLogStreamClient(machineId, { connected: false });
+            connectionClient.sockets.delete(socket);
+            await this.updateLogStreamClient(machineId, { connected: connectionClient.sockets.size > 0 });
         });
+    }
+
+    applyClientStatus(client, status) {
+        for (const key of ['vrchatRunning', 'debugLoggingEnabled']) client[key] = typeof status[key] === 'boolean' ? status[key] : null;
+        for (const key of ['clientVersion', 'platform', 'statusError', 'logDir', 'stateFile']) {
+            client[key] = typeof status[key] === 'string' ? status[key].slice(0, 1024) : '';
+        }
+        client.capabilities = { processStatus: status.capabilities?.processStatus === true,
+            debugLoggingStatus: status.capabilities?.debugLoggingStatus === true, remoteControl: false };
+    }
+
+    logClientDefaults(server) {
+        return { server, machineId: this.currentUser?.id ? `streamer_${this.currentUser.id}` : 'windows-vrchat-client',
+            logDir: '', stateFile: '%CONFIG_DIR%\\streamer-state.json',
+            batchSize: 100, pollMs: 1000, tailBytes: 1048576,
+            historyMode: 'backfill', historyMaxDays: 14, historyMaxFiles: 20,
+            launchVrchat: false, vrchatExe: '', steamAppId: '438100', exitWithVrchat: true,
+            vrchatExitGraceMs: 30000, singleInstance: true };
+    }
+
+    async logClientConfig(server, defaultsOnly = false) {
+        const saved = defaultsOnly ? {} : validateLogClientSettings(JSON.parse(await this.configGet('logStreamClientSettings', '{}')));
+        return { ...this.logClientDefaults(server), ...saved, token: await this.getLogStreamToken() };
     }
 
     async handleLogStreamEvents(machineId, events) {
@@ -4979,6 +5050,36 @@ class HeadlessSession {
 }
 
 async function handleHeadlessRoute(req, res, url) {
+    if (req.method === 'GET' && url.pathname === '/headless/log-stream/installer.exe') {
+        if (!session.loggedIn || process.env.VRCX_LOG_STREAM_ALLOW_TOKEN_READ === '0') {
+            jsonResponse(res, 403, { error: { message: 'Installer configuration download is disabled or backend login is required.' } });
+            return true;
+        }
+        const file = path.join(staticDir, 'downloads', 'vrcx-log-streamer-setup-win-x64-20261006.exe');
+        if (!fs.existsSync(file)) { textResponse(res, 404, 'Log client installer download is not available.'); return true; }
+        const config = await session.logClientConfig(`${req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'}://${req.headers.host}`);
+        const trailer = installerConfigTrailer(config);
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="vrcx-log-streamer-setup-win-x64.exe"',
+            'Content-Length': fs.statSync(file).size + trailer.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        fs.createReadStream(file).on('error', () => res.destroy()).on('end', () => res.end(trailer)).pipe(res, { end: false });
+        return true;
+    }
+    if (req.method === 'GET' && url.pathname === '/headless/log-stream/client.exe') {
+        const file = path.join(staticDir, 'downloads', 'vrcx-log-streamer-win-x64-20261006.exe');
+        if (!fs.existsSync(file)) { textResponse(res, 404, 'Log client download is not available.'); return true; }
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="vrcx-log-streamer-win-x64.exe"' });
+        fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+        return true;
+    }
+    if (req.method === 'GET' && url.pathname === '/headless/log-stream/config') {
+        if (!session.loggedIn || process.env.VRCX_LOG_STREAM_ALLOW_TOKEN_READ === '0') {
+            jsonResponse(res, 403, { error: { message: 'Log client configuration download is disabled or backend login is required.' } });
+        } else {
+            res.setHeader('Content-Disposition', 'attachment; filename="vrcx-log-streamer.config.json"');
+            jsonResponse(res, 200, await session.logClientConfig(`${req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'}://${req.headers.host}`, url.searchParams.get('defaults') === '1'));
+        }
+        return true;
+    }
     if (req.method === 'GET' && url.pathname === '/headless/bootstrap') {
         try { jsonResponse(res, 200, await session.browserBootstrap()); }
         catch (err) { jsonResponse(res, 503, { error: safeError(err) }); }
@@ -5037,6 +5138,20 @@ async function handleHeadlessRoute(req, res, url) {
 
     try {
         const body = await readJsonBody(req);
+        if (req.method === 'POST' && ['/headless/log-stream/config', '/headless/log-stream/token/rotate'].includes(url.pathname)) {
+            const origin = req.headers.origin;
+            if (!session.loggedIn || process.env.VRCX_LOG_STREAM_ALLOW_TOKEN_READ === '0' ||
+                (origin && new URL(origin).host !== req.headers.host)) {
+                jsonResponse(res, 403, { error: { message: 'Log client configuration access denied.' } });
+            } else if (url.pathname.endsWith('/rotate')) {
+                if (body.confirm !== true) jsonResponse(res, 400, { error: { message: 'Token rotation requires confirmation.' } });
+                else jsonResponse(res, 200, { token: await session.rotateLogStreamToken() });
+            } else {
+                await session.saveLogClientSettings(body);
+                jsonResponse(res, 200, { ok: true });
+            }
+            return true;
+        }
         if (req.method === 'POST' && url.pathname === '/headless/config') {
             if (typeof body.key !== 'string' || !isUiConfigKey(body.key)) {
                 jsonResponse(res, 400, { error: { message: 'Invalid UI configuration key' } });

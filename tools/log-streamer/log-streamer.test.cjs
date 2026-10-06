@@ -3,9 +3,23 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { Streamer, readLines, parseArgs } = require('./log-streamer');
+const { Streamer, readLines, parseArgs, expandConfigPath } = require('./log-streamer');
 const { WebSocketServer } = require('ws');
 const { once } = require('node:events');
+
+test('downloaded config paths resolve beside the config and heartbeat reports unknown logging honestly', () => {
+    assert.equal(expandConfigPath('%CONFIG_DIR%/streamer-state.json', '/client/config.json'), '/client/streamer-state.json');
+    const streamer = new Streamer({ ...parseArgs([]), server: 'http://localhost', machineId: 'test' });
+    streamer.connected = true;
+    streamer.vrchatRunning = false;
+    let message;
+    streamer.send = (payload) => { message = payload; return true; };
+    streamer.heartbeat();
+    assert.equal(message.status.vrchatRunning, false);
+    assert.equal(message.status.debugLoggingEnabled, null);
+    assert.equal(message.status.capabilities.remoteControl, false);
+    assert.ok(message.status.clientVersion);
+});
 
 test('byte checkpoints preserve CRLF, UTF-8 and incomplete final lines across scans', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vrcx-stream-test-'));

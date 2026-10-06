@@ -1,5 +1,6 @@
 <template>
     <div class="x-container x-container--auto-height" ref="gameLogRef">
+        <LogStreamStatus v-if="headless" />
         <template v-if="sessionsViewMode === 'sessions'">
             <GameLogSessions>
                 <template #leading>
@@ -144,6 +145,9 @@
     import { removeFromArray } from '../../shared/utils';
     import { useVrcxVueTable } from '../../lib/table/useVrcxVueTable';
     import GameLogSessions from './components/GameLogSessions.vue';
+    import LogStreamStatus from './components/LogStreamStatus.vue';
+
+    const headless = typeof window !== 'undefined' && window.__VRCX_HEADLESS__;
 
     const { gameLogTableLookup, setSessionsViewMode } = useGameLogStore();
     const { gameLogTable, gameLogTableData, sessionsViewMode } = storeToRefs(useGameLogStore());

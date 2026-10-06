@@ -1,5 +1,6 @@
 const headlessBase = '';
 import { getHeadlessBootstrap } from './headlessBootstrap';
+import { isLogClientOnline, latestLogClient, updateLogStreamState } from './logStreamClient';
 
 function shouldUseHeadlessBridge() {
     if (typeof window === 'undefined') return false;
@@ -68,7 +69,11 @@ const appApiFallbacks = {
     SetStartup: () => {},
     SetAppLauncherSettings: () => {},
     HasVRChatRegistryFolder: async () => false,
-    GetVRChatRegistryKeyString: async () => null,
+    GetVRChatRegistryKeyString: async (key) => {
+        const client = latestLogClient();
+        if (key !== 'LOGGING_ENABLED' || !isLogClientOnline(client) || typeof client.debugLoggingEnabled !== 'boolean') return null;
+        return client.debugLoggingEnabled ? '1' : '0';
+    },
     GetVRChatRegistryKey: async () => null,
     GetVRChatRegistry: async () => ({}),
     SetVRChatRegistryKey: async () => false,
@@ -258,6 +263,7 @@ export function installHeadlessBridge() {
     }
 
     window.__VRCX_HEADLESS__ = true;
+    getHeadlessBootstrap().then((boot) => updateLogStreamState(boot.state)).catch(() => {});
     installElectronStub();
     window.AppApi = createAppApiBridge();
     window.WebApi = createWebApiBridge();

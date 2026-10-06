@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+/* global require, __dirname */
 
 const childProcess = require('child_process');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
+const { gzipSync } = require('zlib');
 
 const rootDir = path.resolve(__dirname, '..');
 const buildDir = path.join(rootDir, 'build', 'log-streamer');
@@ -107,6 +109,21 @@ async function main() {
         '--overwrite'
     ]);
     console.log(`Wrote ${outputPath}`);
+
+    const installerBundle = path.join(buildDir, 'installer.bundle.cjs');
+    const installerBlob = path.join(buildDir, 'installer.blob');
+    const installerConfig = path.join(buildDir, 'installer-sea-config.json');
+    const installerOutput = path.join(rootDir, 'build', 'vrcx-log-streamer-setup-win-x64.exe');
+    const compressedClient = path.join(buildDir, 'streamer.exe.gz');
+    fs.writeFileSync(compressedClient, gzipSync(fs.readFileSync(outputPath)));
+    run(esbuildBin, ['tools/log-streamer/installer.js', '--bundle', '--platform=node', '--format=cjs', `--outfile=${installerBundle}`]);
+    fs.writeFileSync(installerConfig, JSON.stringify({ main: installerBundle, output: installerBlob,
+        disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false,
+        assets: { 'streamer.exe.gz': compressedClient, 'install.ps1': path.join(rootDir, 'tools/log-streamer/install.ps1') } }));
+    run(process.execPath, ['--experimental-sea-config', installerConfig]);
+    fs.copyFileSync(nodeExePath, installerOutput);
+    run(postjectBin, [installerOutput, 'NODE_SEA_BLOB', installerBlob, '--sentinel-fuse', seaFuse, '--overwrite']);
+    console.log(`Wrote ${installerOutput}`);
 }
 
 main().catch((err) => {

@@ -17,6 +17,49 @@ const DEFAULT_TAIL_BYTES = 1024 * 1024;
 const DEFAULT_HISTORY_MAX_DAYS = 14;
 const DEFAULT_HISTORY_MAX_FILES = 20;
 const DEFAULT_VRCHAT_STEAM_APP_ID = '438100';
+const CLIENT_VERSION = '2026.10.06';
+
+function readWindowsClientStatus() {
+    if (process.platform !== 'win32') return Promise.resolve({ debugLoggingEnabled: null, userProfile: '' });
+    const script = `
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $ErrorActionPreference = 'Stop'
+        $enabled = $null; $userProfilePath = ''; $errorText = ''
+        try {
+            $p = Get-CimInstance Win32_Process -Filter "Name='VRChat.exe'" | Select-Object -First 1
+            $root = 'Registry::HKEY_CURRENT_USER\\Software\\VRChat\\VRChat'
+            if ($p) {
+                $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid
+                if ($owner.ReturnValue -eq 0) {
+                    $root = 'Registry::HKEY_USERS\\' + $owner.Sid + '\\Software\\VRChat\\VRChat'
+                    $userProfilePath = (Get-CimInstance Win32_UserProfile -Filter ("SID='" + $owner.Sid + "'")).LocalPath
+                }
+            }
+            if (Test-Path -LiteralPath $root) {
+                $entry = (Get-ItemProperty -LiteralPath $root).PSObject.Properties | Where-Object { $_.Name -match '^LOGGING_ENABLED(_h[0-9]+)?$' } | Select-Object -First 1
+                if ($entry) {
+                    $value = $entry.Value
+                    if ($value -is [byte[]]) { $value = [Text.Encoding]::UTF8.GetString($value).Trim([char]0) }
+                    if ([string]$value -eq '1') { $enabled = $true }
+                    elseif ([string]$value -eq '0') { $enabled = $false }
+                }
+            }
+        } catch { $errorText = $_.Exception.Message }
+        @{ debugLoggingEnabled=$enabled; userProfile=$userProfilePath; statusError=$errorText } | ConvertTo-Json -Compress
+    `;
+    return new Promise((resolve) => {
+        childProcess.execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+            { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+                try { resolve(err ? { debugLoggingEnabled: null, statusError: err.message } : JSON.parse(stdout)); }
+                catch { resolve({ debugLoggingEnabled: null, statusError: 'Unable to read Windows client status' }); }
+            });
+    });
+}
+
+function expandConfigPath(value, configFile) {
+    return String(value || '').replace(/%([^%]+)%/g, (match, key) =>
+        key.toUpperCase() === 'CONFIG_DIR' ? path.dirname(configFile) : process.env[key] || process.env[key.toUpperCase()] || match);
+}
 
 function parseArgs(argv) {
     const args = {
@@ -29,7 +72,7 @@ function parseArgs(argv) {
         batchSize: DEFAULT_BATCH_SIZE,
         pollMs: DEFAULT_POLL_MS,
         tailBytes: DEFAULT_TAIL_BYTES,
-        historyMode: process.env.VRCX_LOG_STREAM_HISTORY || 'ask',
+        historyMode: process.env.VRCX_LOG_STREAM_HISTORY || 'backfill',
         historyMaxDays: DEFAULT_HISTORY_MAX_DAYS,
         historyMaxFiles: DEFAULT_HISTORY_MAX_FILES,
         launchVrchat: process.env.VRCX_LOG_STREAM_NO_LAUNCH !== '1',
@@ -95,16 +138,16 @@ function printHelp() {
     console.log(`VRCX log streamer
 
 Usage:
-  vrcx-log-streamer.exe --server http://192.168.10.209:18080 --token TOKEN
+  vrcx-log-streamer.exe --server http://localhost:18080 --token TOKEN
 
 Options:
-  --server URL       Headless backend URL, for example http://192.168.10.209:18080
+  --server URL       Headless backend URL, for example http://localhost:18080
   --token TOKEN      Log stream token from /headless/log-stream/token
   --config PATH      JSON config file. Defaults to vrcx-log-streamer.config.json next to the exe
   --log-dir PATH     VRChat log directory. Defaults to %USERPROFILE%\\AppData\\LocalLow\\VRChat\\VRChat
   --machine-id ID    Stable client id. Defaults to hostname
   --state-file PATH  Checkpoint file path
-  --history-mode M   ask, skip, backfill, or tail. Defaults to ask
+  --history-mode M   ask, skip, backfill, or tail. Defaults to backfill
   --from-start       Alias for --history-mode backfill
   --skip-history     Alias for --history-mode skip
   --no-launch-vrchat Do not launch VRChat; only run the streamer
@@ -336,7 +379,7 @@ function isVrchatRunning() {
                 { windowsHide: true, timeout: 5000 },
                 (err, stdout) => {
                     if (err) {
-                        resolve(false);
+                        resolve(null);
                         return;
                     }
                     resolve(/\bVRChat\.exe\b/i.test(stdout));
@@ -617,10 +660,16 @@ class Streamer {
         this.startupFiles = new Set();
         this.vrchatSeenRunning = false;
         this.vrchatLastSeenAt = 0;
+        this.vrchatRunning = null;
+        this.clientStatus = { debugLoggingEnabled: null };
     }
 
     async start() {
         if (!this.args.token) throw new Error('--token is required');
+        await this.refreshClientStatus();
+        if (!this.args.logDir && this.clientStatus.userProfile) {
+            this.logDir = path.join(this.clientStatus.userProfile, 'AppData', 'LocalLow', 'VRChat', 'VRChat');
+        }
         console.log(`Log directory: ${this.logDir}`);
         console.log(`State file: ${this.stateFile}`);
         await this.resolveHistoryMode();
@@ -645,6 +694,13 @@ class Streamer {
         if (this.historyMode === 'ask') {
             if (!process.stdin.isTTY) {
                 this.historyMode = 'skip';
+                if (process.platform === 'win32') {
+                    const script = `Add-Type -AssemblyName System.Windows.Forms; $answer = [System.Windows.Forms.MessageBox]::Show('Upload historical VRChat logs? Backfill is limited to the latest ${Number(this.args.historyMaxFiles)} files and ${Number(this.args.historyMaxDays)} days. Yes: backfill. No: skip old logs.', 'VRCX Log Streamer', 'YesNo', 'Question', 'Button2'); Write-Output $answer`;
+                    try {
+                        const answer = await new Promise((resolve, reject) => childProcess.execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }, (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
+                        if (answer === 'Yes') this.historyMode = 'backfill';
+                    } catch (error) { console.warn('Unable to ask about historical logs; skipping:', error.message); }
+                }
             } else {
                 console.log(
                     `Found ${uninitialized.length} VRChat log file(s) not in streamer checkpoint.`
@@ -719,6 +775,8 @@ class Streamer {
         while (!this.stopped) {
             try {
                 const running = await isVrchatRunning();
+                this.vrchatRunning = running;
+                if (Date.now() - (this.lastClientStatusAt || 0) >= 15000) await this.refreshClientStatus();
                 if (running) {
                     this.vrchatSeenRunning = true;
                     this.vrchatLastSeenAt = Date.now();
@@ -730,12 +788,13 @@ class Streamer {
                 ) {
                     await this.scan();
                 }
+                this.streamError = '';
                 this.flush();
                 this.heartbeat();
                 if (
                     this.args.exitWithVrchat &&
                     this.vrchatSeenRunning &&
-                    !running &&
+                    running === false &&
                     Date.now() - this.vrchatLastSeenAt >
                         this.args.vrchatExitGraceMs
                 ) {
@@ -746,6 +805,8 @@ class Streamer {
                 }
             } catch (err) {
                 console.error(err.message || err);
+                this.streamError = err.message || String(err);
+                this.heartbeat();
             }
             await new Promise((resolve) =>
                 setTimeout(resolve, this.args.pollMs)
@@ -875,8 +936,21 @@ class Streamer {
         this.lastHeartbeat = Date.now();
         this.send({
             type: 'heartbeat',
-            machineId: this.args.machineId
+            machineId: this.args.machineId,
+            status: {
+                clientVersion: CLIENT_VERSION, platform: process.platform,
+                vrchatRunning: this.vrchatRunning,
+                debugLoggingEnabled: typeof this.clientStatus.debugLoggingEnabled === 'boolean' ? this.clientStatus.debugLoggingEnabled : null,
+                statusError: this.streamError || this.clientStatus.statusError || '',
+                logDir: this.logDir, stateFile: this.stateFile,
+                capabilities: { processStatus: true, debugLoggingStatus: process.platform === 'win32', remoteControl: false }
+            }
         });
+    }
+
+    async refreshClientStatus() {
+        this.clientStatus = await readWindowsClientStatus();
+        this.lastClientStatusAt = Date.now();
     }
 
     handleMessage(raw) {
@@ -936,6 +1010,7 @@ async function main() {
     const configFile = args.configFile || defaultConfigFile();
     applyConfig(args, loadConfig(configFile));
     args.configFile = configFile;
+    for (const key of ['logDir', 'stateFile', 'vrchatExe']) args[key] = expandConfigPath(args[key], configFile);
     if (!Number.isFinite(args.batchSize) || args.batchSize <= 0) {
         args.batchSize = DEFAULT_BATCH_SIZE;
     }
@@ -983,7 +1058,7 @@ async function main() {
     await streamer.start();
 }
 
-module.exports = { Streamer, readLines, parseArgs };
+module.exports = { Streamer, readLines, parseArgs, expandConfigPath };
 
 if (require.main === module || require('node:sea').isSea()) {
     main().catch((err) => {

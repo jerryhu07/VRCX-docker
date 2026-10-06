@@ -46,6 +46,41 @@ test('bootstrap includes UI settings but excludes authentication and API secrets
     assert.equal(boot.currentUser, null);
 });
 
+test('client status retains unknown logging values and exports a complete secret config on demand', async () => {
+    const session = new HeadlessSession({});
+    const client = session.getLogStreamClient('windows');
+    session.applyClientStatus(client, { clientVersion: 'new', platform: 'win32',
+        vrchatRunning: true, debugLoggingEnabled: null, stateFile: 'C:\\client\\streamer-state.json',
+        logDir: 'C:\\logs', capabilities: { processStatus: true, remoteControl: true } });
+    client.connected = true; client.lastSeenAt = new Date().toJSON();
+    const status = session.state().logStream.clients[0];
+    assert.equal(status.debugLoggingEnabled, null);
+    assert.equal(status.capabilities.remoteControl, false);
+    session.getLogStreamToken = async () => 'test-secret';
+    session.configGet = async (key, fallback) => fallback;
+    const config = await session.logClientConfig('https://server.example');
+    assert.equal(config.token, 'test-secret');
+    assert.equal(config.stateFile, '%CONFIG_DIR%\\streamer-state.json');
+    assert.equal(config.launchVrchat, false);
+    assert.equal(config.historyMode, 'backfill');
+    client.lastSeenAt = '2020-01-01T00:00:00Z';
+    assert.equal(session.state().logStream.clients[0].connected, false);
+});
+
+test('closing an old client socket does not disconnect its replacement', async () => {
+    const session = new HeadlessSession({});
+    session.isLogStreamAuthorized = async () => true;
+    session.persistLogStreamClient = async () => {};
+    session.broadcast = () => {};
+    const a = new EventEmitter(); const b = new EventEmitter();
+    await session.handleLogStreamConnection(a, {}, new URL('http://server?machineId=windows'));
+    await session.handleLogStreamConnection(b, {}, new URL('http://server?machineId=windows'));
+    a.emit('close');
+    assert.equal(session.getLogStreamClient('windows').connected, true);
+    b.emit('close');
+    assert.equal(session.getLogStreamClient('windows').connected, false);
+});
+
 test('existing bio records survive the idempotent links schema upgrade', async (t) => {
     const db = new DatabaseSync(':memory:');
     db.exec(`CREATE TABLE usrme_feed_bio (id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT,
