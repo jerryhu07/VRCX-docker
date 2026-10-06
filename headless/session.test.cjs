@@ -301,12 +301,15 @@ test('log stream status restores the latest stored event rather than a replayed 
     const session = createSession();
     session.sqliteExecute = async (sql) => sql.includes('FROM headless_log_stream_clients')
         ? [['test', '', 10, 100, 0]]
+        : sql.startsWith('SELECT data FROM headless_log_stream_events')
+        ? [[JSON.stringify({ loggedAt: '2026-09-23T00:00:00.000Z', parsed: { type: 'location', args: ['wrld_test:1', 'World'] } })]]
         : [['new.txt', 42, '2026-09-23T00:00:00.000Z']];
     await session.restoreLogStreamClients();
     const client = session.getLogStreamClient('test');
     assert.equal(client.currentFile, 'new.txt');
     assert.equal(client.lastEventAt, '2026-09-23T00:00:00.000Z');
     assert.equal(client.acceptedCount, 10);
+    assert.equal(client.currentLocation, 'wrld_test:1');
     assert.equal(client.connected, false);
 });
 

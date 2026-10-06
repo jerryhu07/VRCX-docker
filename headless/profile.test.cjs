@@ -1,11 +1,7 @@
 const assert = require('node:assert/strict');
-
 const test = require('node:test');
-
 const { DatabaseSync } = require('node:sqlite');
-
 const { HeadlessSession } = require('./server');
-
 const { EventEmitter } = require('node:events');
 
 async function setup(t, db = new DatabaseSync(':memory:')) {
@@ -26,6 +22,31 @@ async function setup(t, db = new DatabaseSync(':memory:')) {
     t.after(() => db.close());
     return { session, db };
 }
+
+test('renaming a client cannot accept the same source line twice, including legacy IDs', async (t) => {
+    const { session, db } = await setup(t);
+    await session.initGlobalTables();
+    const event = { file: 'output_log_test.txt', offset: 120, raw: 'original source line', loggedAt: '2026-10-06T16:00:00Z',
+        parsed: { type: 'location', args: ['wrld_test:123', 'World'] }, clientEventId: 'legacy' };
+    db.prepare('INSERT INTO headless_log_stream_events (client_event_id,machine_id,file_name,file_offset,raw_line) VALUES (?,?,?,?,?)')
+        .run('old-machine-hash', 'old-client', event.file, event.offset, event.raw);
+    const result = await session.handleLogStreamEvents('renamed-client', [{ ...event, clientEventId: 'new-machine-hash' }]);
+    assert.equal(result.accepted, 0);
+    assert.equal(result.duplicate, 1);
+    assert.equal(result.checkpoints[event.file], 120);
+    assert.equal(session.getLogStreamClient('renamed-client').currentLocation, 'wrld_test:123');
+    assert.equal(db.prepare('SELECT count(*) AS n FROM headless_log_stream_events').get().n, 1);
+    assert.equal(await session.persistLogStreamEvent('renamed-client', { ...event, offset: 121 }), true);
+    assert.equal(await session.persistLogStreamEvent('another-client', { ...event, offset: 121, clientEventId: 'third-hash' }), false);
+});
+
+test('duplicate context hydration never rewinds a newer live instance', () => {
+    const session = new HeadlessSession({});
+    const client = session.getLogStreamClient('pc');
+    session.hydrateLogStreamContext(client, { loggedAt: '2026-10-06T16:00:00Z', parsed: { type: 'location', args: ['new:1', 'New'] } });
+    session.hydrateLogStreamContext(client, { loggedAt: '2026-10-05T16:00:00Z', parsed: { type: 'location', args: ['old:1', 'Old'] } });
+    assert.equal(client.currentLocation, 'new:1');
+});
 
 test('user colours keep legacy MD5 mapping without ever calling the native bridge', async () => {
     const session = new HeadlessSession({ call: () => assert.fail('native colour call') });

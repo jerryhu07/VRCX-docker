@@ -1258,6 +1258,7 @@ class HeadlessSession {
         await this.sqliteNonQuery(
             'CREATE INDEX IF NOT EXISTS headless_log_stream_events_logged_at_idx ON headless_log_stream_events (logged_at)'
         );
+        await this.sqliteNonQuery('CREATE INDEX IF NOT EXISTS headless_log_stream_events_source_idx ON headless_log_stream_events (file_name, file_offset)');
         await this.sqliteNonQuery(
             'CREATE TABLE IF NOT EXISTS headless_log_stream_clients (machine_id TEXT PRIMARY KEY, last_seen_at TEXT, last_event_at TEXT, current_file TEXT, file_offset INTEGER, connected INTEGER, accepted_count INTEGER, duplicate_count INTEGER, failed_count INTEGER, last_error TEXT)'
         );
@@ -4350,6 +4351,12 @@ class HeadlessSession {
                 client.currentFile = latest[0];
                 client.fileOffset = Number(latest[1]) || 0;
                 client.lastEventAt = latest[2];
+                const events = await this.sqliteExecute('SELECT data FROM headless_log_stream_events WHERE file_name = @file_name ORDER BY file_offset',
+                    { '@file_name': client.currentFile });
+                for (const [data] of events) {
+                    try { const event = JSON.parse(data); if (event && typeof event === 'object') this.hydrateLogStreamContext(client, event); }
+                    catch { console.warn('Skipping malformed stored log stream context.'); }
+                }
             }
         }
     }
@@ -4528,6 +4535,7 @@ class HeadlessSession {
                 }
                 if (!inserted) {
                     duplicate++;
+                    this.hydrateLogStreamContext(client, event);
                     continue;
                 }
                 const loggedAt = event.loggedAt || event.dt || new Date().toJSON();
@@ -4540,6 +4548,7 @@ class HeadlessSession {
                 if (await this.applyLogStreamEvent(machineId, event)) {
                     changed = true;
                 }
+                client.contextEventAt = Math.max(client.contextEventAt || 0, Date.parse(loggedAt) || 0);
             } catch (err) {
                 failed++;
                 client.lastError = err.message || String(err);
@@ -4564,8 +4573,17 @@ class HeadlessSession {
     }
 
     async persistLogStreamEvent(machineId, event) {
-        const clientEventId =
-            event.clientEventId ||
+        const sourceFile = event.file || event.fileName || '';
+        const sourceOffset = Number(event.offset || event.fileOffset || 0);
+        const sourceRaw = event.raw || event.rawLine || '';
+        if (sourceFile && sourceOffset > 0 && sourceRaw) {
+            const source = await this.sqliteExecute('SELECT client_event_id FROM headless_log_stream_events WHERE file_name = @file_name AND file_offset = @file_offset AND raw_line = @raw_line LIMIT 1',
+                { '@file_name': sourceFile, '@file_offset': sourceOffset, '@raw_line': sourceRaw });
+            if (source.length) return false;
+        }
+        const clientEventId = sourceFile && sourceOffset > 0 && sourceRaw
+            ? crypto.createHash('sha256').update(JSON.stringify([sourceFile, sourceOffset, sourceRaw])).digest('hex')
+            : event.clientEventId ||
             event.id ||
             crypto
                 .createHash('sha256')
@@ -4588,8 +4606,8 @@ class HeadlessSession {
 
         const rawLog = Array.isArray(event.rawLog) ? event.rawLog : [];
         const eventType = event.parsed?.type || rawLog[2] || '';
-        await this.sqliteNonQuery(
-            `INSERT INTO headless_log_stream_events
+        const inserted = await this.sqliteNonQuery(
+            `INSERT OR IGNORE INTO headless_log_stream_events
              (client_event_id, received_at, machine_id, file_name, file_offset, logged_at, event_type, raw_line, data)
              VALUES (@client_event_id, @received_at, @machine_id, @file_name, @file_offset, @logged_at, @event_type, @raw_line, @data)`,
             {
@@ -4604,7 +4622,31 @@ class HeadlessSession {
                 '@data': JSON.stringify({ ...event, clientEventId })
             }
         );
-        return true;
+        return Number(inserted) > 0;
+    }
+
+    hydrateLogStreamContext(client, event) {
+        const rawLog = Array.isArray(event.rawLog) ? event.rawLog : [];
+        const type = event.parsed?.type || rawLog[2] || '';
+        const args = Array.isArray(event.parsed?.args) ? event.parsed.args : rawLog.slice(3);
+        const createdAt = event.loggedAt || event.dt || rawLog[1];
+        const at = Date.parse(createdAt) || 0;
+        if (!at || at < (client.contextEventAt || 0)) return;
+        client.contextEventAt = at;
+        if (type === 'location') {
+            client.currentLocation = args[0] || '';
+            client.currentWorldName = args[1] || '';
+            client.currentLocationCreatedAt = createdAt;
+            client.currentLocationAt = at;
+            client.players.clear();
+        } else if (type === 'location-destination') {
+            client.destinationLocation = args[0] || '';
+            client.currentLocation = '';
+        } else if (type === 'OnPlayerJoined') {
+            client.players.set(args[1] || args[0], { displayName: args[0] || '', userId: args[1] || '', joinTime: at });
+        } else if (type === 'OnPlayerLeft') {
+            client.players.delete(args[1] || args[0]);
+        }
     }
 
     // Raw source tables stay source-specific. gamelog_* is the normalized UI
