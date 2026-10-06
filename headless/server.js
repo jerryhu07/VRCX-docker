@@ -33,6 +33,7 @@ const watchRetryIntervalMs = 15 * 60 * 1000;
 const mutualNetworkIntervalMs = 24 * 60 * 60 * 1000;
 const mutualNetworkSchedulerIntervalMs = 5 * 60 * 1000;
 const mutualNetworkRequestDelayMs = 220;
+const profileRefreshIntervalMs = 7 * 24 * 60 * 60 * 1000;
 
 const defaultEndpoint = 'https://api.vrchat.cloud/api/1';
 const defaultPipeline = 'wss://pipeline.vrchat.cloud';
@@ -706,6 +707,9 @@ class HeadlessSession {
         this.worldNameCache = new Map();
         this.groupNameCache = new Map();
         this.avatarNameCache = new Map();
+        this.profileUpdates = new Map();
+        this.profileFetches = new Map();
+        this.profileAttempts = new Map();
         this.startedAt = new Date().toJSON();
         this.cookieJar = new CookieJar(this);
         this.logStreamToken = process.env.VRCX_LOG_STREAM_TOKEN || '';
@@ -897,6 +901,7 @@ class HeadlessSession {
         this.stopFriendRefreshLoop();
         this.stopWatchListLoop();
         this.stopMutualNetworkLoop();
+        clearInterval(this.profileRefreshTimer);
         this.closePipeline();
     }
 
@@ -1056,6 +1061,7 @@ class HeadlessSession {
         }
 
         const wasLoggedIn = this.loggedIn;
+        const requestOwnerId = this.currentUser?.id;
         const trustedCookies = this.cookieJar
             .cloneCookies()
             .filter((cookie) => this.isTwoFactorCookie(cookie));
@@ -1108,13 +1114,29 @@ class HeadlessSession {
                 // VRCX upstream f4441e8c / defa27fc: public profile fields moved
                 // to /profile. Merge here so browser and background jobs agree.
                 const user = parseMaybeJson(data);
-                const profile = await this.vrchatRequest(`profile/${userMatch[1]}`);
+                const profile = await this.fetchPublicProfile(userMatch[1]);
                 if (!user?.id || profile?.id !== user.id) {
                     throw new Error('VRChat returned an invalid public profile');
                 }
                 data = JSON.stringify({ ...user, ...profile });
             }
-            data = this.augmentApiResponse(options.url, data);
+            const profileMatch = endpoint?.match(/^profile\/(usr_[^/]+)$/);
+            if (init.method === 'GET' && profileMatch && this.currentUser?.id === requestOwnerId) {
+                const profile = parseMaybeJson(data);
+                if (profile?.id !== profileMatch[1]) throw new Error('VRChat returned an invalid public profile');
+                await this.recordPublicProfile(profile, { fetched: true });
+            }
+            if (!options.rawFriendSnapshot && init.method === 'GET' && endpoint === 'auth/user/friends' && this.currentUser?.id) {
+                const users = parseMaybeJson(data);
+                if (Array.isArray(users)) {
+                    const rows = await this.sqliteExecute(
+                        `SELECT user_id, profile_json FROM ${userPrefix(this.currentUser.id)}_user_profile`
+                    );
+                    const profiles = new Map(rows.map(([id, json]) => [id, parseMaybeJson(json)]));
+                    data = JSON.stringify(users.map((user) => ({ ...profiles.get(user.id), ...user })));
+                }
+            }
+            if (!options.rawFriendSnapshot) data = this.augmentApiResponse(options.url, data);
         }
 
         return {
@@ -1247,6 +1269,15 @@ class HeadlessSession {
         );
         await this.sqliteNonQuery(
             `CREATE TABLE IF NOT EXISTS ${prefix}_feed_bio (id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT, display_name TEXT, bio TEXT, previous_bio TEXT)`
+        );
+        const bioColumns = await this.sqliteExecute(`PRAGMA table_info(${prefix}_feed_bio)`);
+        for (const column of ['bio_links', 'previous_bio_links']) {
+            if (!bioColumns.some((row) => row[1] === column)) {
+                await this.sqliteNonQuery(`ALTER TABLE ${prefix}_feed_bio ADD COLUMN ${column} TEXT DEFAULT '[]'`);
+            }
+        }
+        await this.sqliteNonQuery(
+            `CREATE TABLE IF NOT EXISTS ${prefix}_user_profile (user_id TEXT PRIMARY KEY, bio TEXT, bio_links TEXT, updated_at TEXT, profile_json TEXT, fetched_at TEXT)`
         );
         await this.sqliteNonQuery(
             `CREATE TABLE IF NOT EXISTS ${prefix}_feed_avatar (id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT, display_name TEXT, owner_id TEXT, avatar_name TEXT, current_avatar_image_url TEXT, current_avatar_thumbnail_image_url TEXT, previous_current_avatar_image_url TEXT, previous_current_avatar_thumbnail_image_url TEXT)`
@@ -1800,6 +1831,14 @@ class HeadlessSession {
         await this.loadFriendSnapshot();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
         this.startWatchListLoop();
+        clearInterval(this.profileRefreshTimer);
+        this.profileRefreshTimer = setInterval(() => this.refreshStaleProfiles().catch((err) => {
+            console.warn('Public profile refresh failed:', err.message || err);
+        }), watchSchedulerIntervalMs);
+        this.profileRefreshTimer.unref?.();
+        this.refreshStaleProfiles().catch((err) => {
+            console.warn('Initial public profile refresh failed:', err.message || err);
+        });
         await this.seedMutualNetworkSnapshotFromCurrent();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
         this.startMutualNetworkLoop();
@@ -1809,6 +1848,120 @@ class HeadlessSession {
         await this.backfillFeedFromPipelineEvents();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
         this.broadcast({ type: 'feed-refresh' });
+    }
+
+    async getCachedProfile(userId) {
+        if (!this.currentUser?.id) return null;
+        const rows = await this.sqliteExecute(
+            `SELECT profile_json, fetched_at FROM ${userPrefix(this.currentUser.id)}_user_profile WHERE user_id = @user_id`,
+            { '@user_id': userId }
+        );
+        return rows.length ? { profile: parseMaybeJson(rows[0][0]), fetchedAt: rows[0][1] } : null;
+    }
+
+    async fetchPublicProfile(userId) {
+        const key = `${this.currentUser?.id}:${userId}`;
+        if (this.profileFetches.has(key)) return await this.profileFetches.get(key);
+        const request = this.vrchatRequest(`profile/${userId}`);
+        this.profileFetches.set(key, request);
+        try {
+            return await request;
+        } finally {
+            this.profileFetches.delete(key);
+        }
+    }
+
+    async refreshStaleProfiles() {
+        if (this.profileRefreshRunning || !this.loggedIn) return;
+        const ownerId = this.currentUser?.id;
+        this.profileRefreshRunning = true;
+        try {
+            const dates = new Map(await this.sqliteExecute(
+                `SELECT user_id, fetched_at FROM ${userPrefix(ownerId)}_user_profile`
+            ));
+            for (const userId of this.friends.keys()) {
+                if (!this.loggedIn || this.currentUser?.id !== ownerId) break;
+                if (Date.now() - Date.parse(dates.get(userId)) < profileRefreshIntervalMs) continue;
+                if (Date.now() - (this.profileAttempts.get(userId) || 0) < watchRetryIntervalMs) continue;
+                this.profileAttempts.set(userId, Date.now());
+                try {
+                    await this.fetchPublicProfile(userId);
+                } catch (err) {
+                    console.warn('Failed to refresh public profile:', userId, err.message || err);
+                }
+                await new Promise((resolve) => setTimeout(resolve, mutualNetworkRequestDelayMs));
+            }
+        } finally {
+            this.profileRefreshRunning = false;
+        }
+    }
+
+    async recordPublicProfile(profile, { fetched = false, createdAt = new Date().toJSON() } = {}) {
+        const ownerId = this.currentUser?.id;
+        if (!ownerId || !profile?.id) return false;
+        const key = `${ownerId}:${profile.id}`;
+        const update = (this.profileUpdates.get(key) || Promise.resolve()).catch(() => {}).then(async () => {
+            if (this.currentUser?.id !== ownerId) return false;
+            const cached = await this.getCachedProfile(profile.id);
+            const previous = cached?.profile;
+            const next = { ...(previous || {}), ...profile };
+            let changed = false;
+            const avatars = [];
+            if (previous && this.isKnownFriend(profile.id)) {
+                const candidates = [];
+                if (hasOwn(previous, 'bannerUrl') && next.bannerType === 'avatarBanner' && next.bannerUrl &&
+                    (next.bannerUrl !== previous.bannerUrl || previous.bannerType !== 'avatarBanner')) {
+                    candidates.push([next.bannerUrl, previous.bannerType === 'avatarBanner' ? previous.bannerUrl : '']);
+                }
+                if (hasOwn(previous, 'iconUrl') && next.iconUrl && next.iconUrl !== previous.iconUrl) candidates.push([next.iconUrl, previous.iconUrl]);
+                if (!next.iconUrl && !next.bannerUrl && !next.profilePicOverride) {
+                    const image = next.currentAvatarImageUrl || next.currentAvatarThumbnailImageUrl;
+                    const oldImage = previous.currentAvatarImageUrl || previous.currentAvatarThumbnailImageUrl;
+                    if (oldImage && image && image !== oldImage) candidates.push([image, oldImage]);
+                }
+                const seen = new Set();
+                for (const [image, oldImage] of candidates) {
+                    const fileId = extractFileId(image) || image;
+                    if (seen.has(fileId)) continue;
+                    seen.add(fileId);
+                    const info = await this.getAvatarInfo(image);
+                    if (info.unavailable) throw new Error('Avatar metadata temporarily unavailable');
+                    if (!info.ownerId) continue;
+                    const oldInfo = oldImage ? await this.getAvatarInfo(oldImage) : {};
+                    avatars.push({ image, oldImage: oldInfo.ownerId ? oldImage : '', info });
+                }
+                if ((hasOwn(profile, 'bio') && hasOwn(previous, 'bio') && previous.bio !== next.bio) ||
+                    (hasOwn(profile, 'bioLinks') && hasOwn(previous, 'bioLinks') &&
+                        JSON.stringify(previous.bioLinks) !== JSON.stringify(next.bioLinks))) {
+                    await this.addBioFeed({ created_at: createdAt, userId: profile.id,
+                        displayName: next.displayName || this.friends.get(profile.id)?.displayName || profile.id,
+                        bio: next.bio || '', previousBio: previous.bio || '',
+                        bioLinks: next.bioLinks || [], previousBioLinks: previous.bioLinks || [] }, ownerId);
+                    changed = true;
+                }
+                for (const avatar of avatars) {
+                    changed = (await this.addAvatarFeed({ created_at: createdAt, userId: profile.id,
+                        displayName: next.displayName || this.friends.get(profile.id)?.displayName || profile.id,
+                        currentAvatarImageUrl: avatar.image, currentAvatarThumbnailImageUrl: avatar.image,
+                        previousCurrentAvatarImageUrl: avatar.oldImage, previousCurrentAvatarThumbnailImageUrl: avatar.oldImage,
+                        avatarInfo: avatar.info }, ownerId)) || changed;
+                }
+            }
+            await this.sqliteNonQuery(
+                `INSERT OR REPLACE INTO ${userPrefix(ownerId)}_user_profile (user_id, bio, bio_links, updated_at, profile_json, fetched_at) VALUES (@id, @bio, @links, @updated, @profile, @fetched)`,
+                { '@id': profile.id, '@bio': next.bio ?? '', '@links': JSON.stringify(next.bioLinks || []),
+                    '@updated': createdAt, '@profile': JSON.stringify(next),
+                    '@fetched': fetched ? createdAt : (typeof cached?.fetchedAt === 'string' ? cached.fetchedAt : '') }
+            );
+            if (changed) this.broadcast({ type: 'feed-refresh' });
+            return changed;
+        });
+        this.profileUpdates.set(key, update);
+        try {
+            return await update;
+        } finally {
+            if (this.profileUpdates.get(key) === update) this.profileUpdates.delete(key);
+        }
     }
 
     async backfillSelfInstanceActivityFromLocations() {
@@ -2427,6 +2580,7 @@ class HeadlessSession {
     async fetchWatchProfile(userId) {
         const profile = await this.vrchatRequest(`users/${userId}`);
         const avatarInfo = await this.getAvatarInfo(
+            (profile?.bannerType === 'avatarBanner' ? profile.bannerUrl : '') ||
             profile?.currentAvatarImageUrl ||
                 profile?.currentAvatarThumbnailImageUrl ||
                 profile?.iconUrl ||
@@ -3306,62 +3460,23 @@ class HeadlessSession {
             feedChanged = true;
         }
 
-        if (
-            hasOwn(incoming, 'bio') &&
-            previous.bio &&
-            next.bio &&
-            previous.bio !== next.bio
-        ) {
-            await this.addBioFeed({
-                created_at: createdAt,
-                userId: next.id,
-                displayName: next.displayName || '',
-                bio: next.bio || '',
-                previousBio: previous.bio || ''
-            });
-            feedChanged = true;
-        }
-
-        const avatarImageChanged =
-            hasOwn(incoming, 'currentAvatarImageUrl') &&
-            previous.currentAvatarImageUrl !== next.currentAvatarImageUrl;
-        const avatarThumbnailChanged =
-            hasOwn(incoming, 'currentAvatarThumbnailImageUrl') &&
-            previous.currentAvatarThumbnailImageUrl !==
-                next.currentAvatarThumbnailImageUrl;
-        const avatarTagsChanged =
-            hasOwn(incoming, 'currentAvatarTags') &&
-            JSON.stringify(previous.currentAvatarTags || []) !==
-                JSON.stringify(next.currentAvatarTags || []);
-        if (
-            (avatarImageChanged ||
-                avatarThumbnailChanged ||
-                avatarTagsChanged) &&
-            !next.profilePicOverride &&
-            (next.currentAvatarImageUrl || next.currentAvatarThumbnailImageUrl)
-        ) {
-            await this.addAvatarFeed({
-                created_at: createdAt,
-                userId: next.id,
-                displayName: next.displayName || '',
-                currentAvatarImageUrl: next.currentAvatarImageUrl || '',
-                currentAvatarThumbnailImageUrl:
-                    next.currentAvatarThumbnailImageUrl || '',
-                previousCurrentAvatarImageUrl:
-                    previous.currentAvatarImageUrl || '',
-                previousCurrentAvatarThumbnailImageUrl:
-                    previous.currentAvatarThumbnailImageUrl || '',
-                fallbackAvatarName: next.currentAvatar || ''
-            });
-            feedChanged = true;
-        }
         return feedChanged;
     }
 
     async mergeUser(user, { state = user.state, persist = true } = {}) {
         const diff = this.mergeFriendRecord(this.friends, user, { state });
         if (!diff || !persist) return false;
-        return await this.applyFeedDiff(diff);
+        const changed = await this.applyFeedDiff(diff);
+        const fields = Object.fromEntries(['id', 'displayName', 'bio', 'bioLinks', 'iconUrl',
+            'bannerType', 'bannerUrl', 'currentAvatarImageUrl', 'currentAvatarThumbnailImageUrl',
+            'profilePicOverride'].filter((key) => hasOwn(user, key)).map((key) => [key, user[key]]));
+        if (Object.keys(fields).every((key) => key === 'id' || key === 'displayName')) return changed;
+        try {
+            return (await this.recordPublicProfile(fields)) || changed;
+        } catch (err) {
+            console.warn('Failed to record public profile update:', user.id, err.message || err);
+            return changed;
+        }
     }
 
     apiEndpointFromUrl(value) {
@@ -3646,21 +3761,23 @@ class HeadlessSession {
         );
     }
 
-    async addBioFeed(entry) {
-        const prefix = userPrefix(this.currentUser.id);
+    async addBioFeed(entry, ownerId = this.currentUser.id) {
+        const prefix = userPrefix(ownerId);
         await this.sqliteNonQuery(
-            `INSERT INTO ${prefix}_feed_bio (created_at, user_id, display_name, bio, previous_bio)
-             SELECT @created_at, @user_id, @display_name, @bio, @previous_bio
+            `INSERT INTO ${prefix}_feed_bio (created_at, user_id, display_name, bio, previous_bio, bio_links, previous_bio_links)
+             SELECT @created_at, @user_id, @display_name, @bio, @previous_bio, @bio_links, @previous_bio_links
              WHERE NOT EXISTS (
                  SELECT 1 FROM ${prefix}_feed_bio
-                 WHERE created_at = @created_at AND user_id = @user_id AND bio = @bio
+                 WHERE created_at = @created_at AND user_id = @user_id AND bio = @bio AND COALESCE(bio_links, '[]') = @bio_links
              )`,
             {
                 '@created_at': entry.created_at || new Date().toJSON(),
                 '@user_id': entry.userId,
                 '@display_name': entry.displayName || '',
                 '@bio': entry.bio || '',
-                '@previous_bio': entry.previousBio || ''
+                '@previous_bio': entry.previousBio || '',
+                '@bio_links': JSON.stringify(entry.bioLinks || []),
+                '@previous_bio_links': JSON.stringify(entry.previousBioLinks || [])
             }
         );
     }
@@ -3678,29 +3795,30 @@ class HeadlessSession {
         }
         try {
             const file = await this.vrchatRequest(`file/${fileId}`);
+            const name = file?.tags?.includes('icon') ? '' : parseAvatarName(file);
             const info = {
-                ownerId: file?.ownerId || '',
-                avatarName: parseAvatarName(file) || fallbackAvatarName || '-'
+                ownerId: name ? file?.ownerId || '' : '',
+                avatarName: name || '-'
             };
             this.avatarNameCache.set(fileId, info);
             return info;
-        } catch (err) {
-            const info = {
+        } catch {
+            return {
                 ownerId: '',
-                avatarName: fallbackAvatarName || '-'
+                avatarName: fallbackAvatarName || '-',
+                unavailable: true
             };
-            this.avatarNameCache.set(fileId, info);
-            return info;
         }
     }
 
-    async addAvatarFeed(entry) {
-        const prefix = userPrefix(this.currentUser.id);
-        const avatarInfo = await this.getAvatarInfo(
+    async addAvatarFeed(entry, ownerId = this.currentUser.id) {
+        const prefix = userPrefix(ownerId);
+        const avatarInfo = entry.avatarInfo || await this.getAvatarInfo(
             entry.currentAvatarImageUrl || entry.currentAvatarThumbnailImageUrl,
             entry.fallbackAvatarName || ''
         );
-        await this.sqliteNonQuery(
+        if (!avatarInfo.ownerId) return false;
+        const inserted = await this.sqliteNonQuery(
             `INSERT INTO ${prefix}_feed_avatar (created_at, user_id, display_name, owner_id, avatar_name, current_avatar_image_url, current_avatar_thumbnail_image_url, previous_current_avatar_image_url, previous_current_avatar_thumbnail_image_url)
              SELECT @created_at, @user_id, @display_name, @owner_id, @avatar_name, @current_avatar_image_url, @current_avatar_thumbnail_image_url, @previous_current_avatar_image_url, @previous_current_avatar_thumbnail_image_url
              WHERE NOT EXISTS (
@@ -3722,6 +3840,7 @@ class HeadlessSession {
                     entry.previousCurrentAvatarThumbnailImageUrl || ''
             }
         );
+        return Number(inserted) > 0;
     }
 
     async getFriendLogCurrentMap() {
@@ -5241,6 +5360,7 @@ async function bootstrap() {
         try {
             session.stopAuthRecoveryLoop();
             session.stopPipelineRecoveryLoop();
+            clearInterval(session.profileRefreshTimer);
             session.closePipeline();
             await bridge.getObject('VRCXStorage').Save();
             await bridge.getObject('SQLite').Exit();

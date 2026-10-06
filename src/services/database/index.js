@@ -150,6 +150,11 @@ const database = {
         await sqliteService.executeNonQuery(
             `CREATE TABLE IF NOT EXISTS ${dbVars.userPrefix}_mutual_graph_meta (friend_id TEXT PRIMARY KEY, last_fetched_at TEXT, opted_out INTEGER DEFAULT 0)`
         );
+        const columns = [];
+        await sqliteService.execute((row) => columns.push(row[1]), `PRAGMA table_info(${dbVars.userPrefix}_feed_bio)`);
+        for (const column of ['bio_links', 'previous_bio_links']) {
+            if (!columns.includes(column)) await sqliteService.executeNonQuery(`ALTER TABLE ${dbVars.userPrefix}_feed_bio ADD COLUMN ${column} TEXT DEFAULT '[]'`);
+        }
     },
 
     async initTables() {

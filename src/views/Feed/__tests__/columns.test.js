@@ -118,4 +118,17 @@ describe('views/Feed/columns.jsx', () => {
         expect(preNode.props.innerHTML).toContain('x-text-removed');
         expect(preNode.props.innerHTML).toContain('<br>');
     });
+
+    test('shows and safely highlights changes that affect only bio links', () => {
+        const original = { type: 'Bio', bio: '', previousBio: '',
+            bioLinks: ['https://new.example/<script>'], previousBioLinks: ['https://old.example'] };
+        const detail = columns.find((c) => c.id === 'detail').cell({ row: { original } });
+        expect(detail.children).toContain('https://new.example/<script>');
+        const expanded = columns.find((c) => c.id === 'expander').meta.expandedRow({ row: { original } });
+        const html = findNode(expanded, (n) => n.type === 'pre').props.innerHTML;
+        expect(html).toContain('x-text-added');
+        expect(html).toContain('x-text-removed');
+        expect(html).toContain('https://old.example');
+        expect(html).not.toContain('<script>');
+    });
 });

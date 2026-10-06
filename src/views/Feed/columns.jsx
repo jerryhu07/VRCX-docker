@@ -30,6 +30,8 @@ const getFriendStore = () => {
     return friendStore;
 };
 
+const bioWithLinks = (bio, links = []) => [bio || '', ...links].filter(Boolean).join('\n');
+
 const expandedRow = ({ row }) => {
     const original = row.original;
     const type = original.type;
@@ -196,8 +198,8 @@ const expandedRow = ({ row }) => {
                 <pre
                     class="text-xs leading-5.5 whitespace-pre-wrap font-[inherit]"
                     innerHTML={formatDifference(
-                        original.previousBio,
-                        original.bio
+                        bioWithLinks(original.previousBio, original.previousBioLinks),
+                        bioWithLinks(original.bio, original.bioLinks)
                     )}
                 ></pre>
             </div>
@@ -409,7 +411,7 @@ export const columns = [
             if (type === 'Bio') {
                 return (
                     <span class="block w-full min-w-0 truncate">
-                        {original.bio}
+                        {bioWithLinks(original.bio, original.bioLinks)}
                     </span>
                 );
             }
