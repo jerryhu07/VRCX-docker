@@ -96,6 +96,22 @@ export const useVrcxStore = defineStore('Vrcx', () => {
      */
     async function init() {
         try {
+            if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+                const [version, maxRows, searchRows, cacheFrequency] = await Promise.all([
+                    configRepository.getInt('VRCX_databaseVersion', 16),
+                    configRepository.getInt('VRCX_maxTableSize_v2', DEFAULT_MAX_TABLE_SIZE),
+                    configRepository.getInt('VRCX_searchLimit', DEFAULT_SEARCH_LIMIT),
+                    configRepository.getInt('VRCX_clearVRCXCacheFrequency', 172800)
+                ]);
+                state.databaseVersion = version;
+                maxTableSize.value = maxRows;
+                searchLimit.value = Math.min(SEARCH_LIMIT_MAX, Math.max(SEARCH_LIMIT_MIN, searchRows));
+                clearVRCXCacheFrequency.value = cacheFrequency;
+                database.setMaxTableSize(maxRows);
+                database.setSearchTableSize(searchLimit.value);
+                databaseReadyForAutoLogin.value = true;
+                return;
+            }
             if (LINUX) {
                 try {
                     window.electron.ipcRenderer.on(

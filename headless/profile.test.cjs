@@ -27,6 +27,25 @@ async function setup(t, db = new DatabaseSync(':memory:')) {
     return { session, db };
 }
 
+test('user colours keep legacy MD5 mapping without ever calling the native bridge', async () => {
+    const session = new HeadlessSession({ call: () => assert.fail('native colour call') });
+    assert.equal(await session.call('AppApiElectron', 'GetColourFromUserID', ['abc']), 38972);
+    assert.deepEqual(await session.call('AppApiElectron', 'GetColourBulk', [['abc', 'abc']]), { abc: 38972 });
+    await assert.rejects(session.call('AppApiElectron', 'GetColourFromUserID', [null]), /Invalid/);
+});
+
+test('bootstrap includes UI settings but excludes authentication and API secrets', async () => {
+    const session = new HeadlessSession({ call: async () => '{}' });
+    session.sqliteExecute = async () => [
+        ['config:vrcx_maxtablesize_v2', '500'], ['config:friendloginit_usr_me', 'true'],
+        ['config:savedcredentials', 'password'], ['config:logstreamtoken', 'token'],
+        ['config:vrcx_openaiapikey', 'secret'], ['config:vrcx_missing', {}]
+    ];
+    const boot = await session.browserBootstrap();
+    assert.deepEqual(boot.config, { 'config:vrcx_maxtablesize_v2': '500', 'config:friendloginit_usr_me': 'true' });
+    assert.equal(boot.currentUser, null);
+});
+
 test('existing bio records survive the idempotent links schema upgrade', async (t) => {
     const db = new DatabaseSync(':memory:');
     db.exec(`CREATE TABLE usrme_feed_bio (id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT,

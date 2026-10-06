@@ -29,6 +29,7 @@ import { watchState } from '../services/watchState';
 import configRepository from '../services/config';
 import security from '../services/security';
 import webApiService from '../services/webapi';
+import { getHeadlessBootstrap } from '../services/headlessBootstrap';
 
 import * as workerTimers from 'worker-timers';
 import { useActivityStore } from './activity';
@@ -234,20 +235,13 @@ export const useAuthStore = defineStore('Auth', () => {
      * @returns {Promise<void>}
      */
     async function autoLoginAfterMounted() {
-        const canAutoLogin = await vrcxStore.waitForDatabaseInit();
-        if (!canAutoLogin) {
-            console.warn(
-                'Skipping auto-login after mount because database initialization did not complete successfully.'
-            );
-            return;
-        }
         if (isHeadlessMode()) {
             initWebsocket();
             loginForm.value.loading = true;
             try {
-                const user = await headlessSessionPost(
-                    '/headless/session/recover'
-                );
+                const boot = await getHeadlessBootstrap();
+                const user = boot.state.loggedIn && boot.currentUser ? boot.currentUser
+                    : await headlessSessionPost('/headless/session/recover');
                 handleCurrentUserUpdate(user);
             } catch (err) {
                 const state =
@@ -261,6 +255,8 @@ export const useAuthStore = defineStore('Auth', () => {
             }
             return;
         }
+        const canAutoLogin = await vrcxStore.waitForDatabaseInit();
+        if (!canAutoLogin) return;
         if (
             !advancedSettingsStore.enablePrimaryPassword &&
             (await configRepository.getString('lastUserLoggedIn')) !== null
@@ -1117,13 +1113,6 @@ export const useAuthStore = defineStore('Auth', () => {
      *
      */
     async function handleAutoLogin() {
-        const canAutoLogin = await vrcxStore.waitForDatabaseInit();
-        if (!canAutoLogin) {
-            console.warn(
-                'Skipping auto-login because database initialization did not complete successfully.'
-            );
-            return;
-        }
         if (isHeadlessMode()) {
             if (attemptingAutoLogin.value) return;
             attemptingAutoLogin.value = true;
@@ -1139,6 +1128,8 @@ export const useAuthStore = defineStore('Auth', () => {
             }
             return;
         }
+        const canAutoLogin = await vrcxStore.waitForDatabaseInit();
+        if (!canAutoLogin) return;
         await runHandleAutoLoginFlow();
     }
 
@@ -1211,7 +1202,7 @@ export const useAuthStore = defineStore('Auth', () => {
             return;
         }
         await database.initUserTables(userStore.currentUser.id);
-        advancedSettingsStore.runAvatarAutoCleanup(userStore.currentUser.id);
+        if (!isHeadlessMode()) advancedSettingsStore.runAvatarAutoCleanup(userStore.currentUser.id);
         watchState.isLoggedIn = true;
         AppApi.CheckGameRunning(); // restore state from hot-reload
 

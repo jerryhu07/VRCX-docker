@@ -1,4 +1,5 @@
 import sqliteService from './sqlite.js';
+import { getHeadlessBootstrap, isHeadlessUiConfig } from './headlessBootstrap';
 
 /**
  *
@@ -10,6 +11,7 @@ function transformKey(key) {
 
 class ConfigRepository {
     async init() {
+        if (window.__VRCX_HEADLESS__) { await getHeadlessBootstrap(); return; }
         await sqliteService.executeNonQuery(
             'CREATE TABLE IF NOT EXISTS configs (`key` TEXT PRIMARY KEY, `value` TEXT)'
         );
@@ -17,6 +19,13 @@ class ConfigRepository {
 
     async remove(key) {
         const _key = transformKey(key);
+        if (window.__VRCX_HEADLESS__ && isHeadlessUiConfig(key)) {
+            const boot = await getHeadlessBootstrap();
+            const response = await fetch('/headless/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, remove: true }) });
+            if (!response.ok) throw new Error('Failed to remove configuration');
+            delete boot.config[_key];
+            return;
+        }
         await sqliteService.executeNonQuery(
             `DELETE FROM configs WHERE key = @key`,
             {
@@ -33,7 +42,9 @@ class ConfigRepository {
     async getString(key, defaultValue = null) {
         const _key = transformKey(key);
         let value = undefined;
-        await sqliteService.execute(
+        if (window.__VRCX_HEADLESS__ && isHeadlessUiConfig(key)) {
+            value = (await getHeadlessBootstrap()).config[_key];
+        } else await sqliteService.execute(
             (row) => {
                 value = row[0];
             },
@@ -57,6 +68,14 @@ class ConfigRepository {
     async setString(key, value) {
         const _key = transformKey(key);
         const _value = String(value);
+        if (window.__VRCX_HEADLESS__ && isHeadlessUiConfig(key)) {
+            const boot = await getHeadlessBootstrap();
+            if (boot.config[_key] === _value) return;
+            const response = await fetch('/headless/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value: _value }) });
+            if (!response.ok) throw new Error('Failed to save configuration');
+            boot.config[_key] = _value;
+            return;
+        }
         await sqliteService.executeNonQuery(
             `INSERT OR REPLACE INTO configs (key, value) VALUES (@key, @value)`,
             {

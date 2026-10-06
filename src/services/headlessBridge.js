@@ -1,4 +1,5 @@
 const headlessBase = '';
+import { getHeadlessBootstrap } from './headlessBootstrap';
 
 function shouldUseHeadlessBridge() {
     if (typeof window === 'undefined') return false;
@@ -65,6 +66,13 @@ const appApiFallbacks = {
     ChangeTheme: () => {},
     DoFunny: () => {},
     SetStartup: () => {},
+    SetAppLauncherSettings: () => {},
+    HasVRChatRegistryFolder: async () => false,
+    GetVRChatRegistryKeyString: async () => null,
+    GetVRChatRegistryKey: async () => null,
+    GetVRChatRegistry: async () => ({}),
+    SetVRChatRegistryKey: async () => false,
+    GetVRChatRegistryJson: async () => '{}',
     CopyImageToClipboard: () => {},
     FlashWindow: () => {},
     SetTrayIconNotification: () => {},
@@ -103,6 +111,18 @@ function createAppApiBridge() {
         {
             get(_, methodName) {
                 if (typeof methodName !== 'string') return undefined;
+                if (methodName === 'GetColourFromUserID') return async (id) => {
+                    const boot = await getHeadlessBootstrap();
+                    if (!Object.hasOwn(boot.colours, id)) boot.colours[id] = await proxy[methodName](id);
+                    return boot.colours[id];
+                };
+                if (methodName === 'GetColourBulk') return async (ids) => {
+                    const boot = await getHeadlessBootstrap();
+                    const missing = ids.filter((id) => !Object.hasOwn(boot.colours, id));
+                    if (missing.length) Object.assign(boot.colours, await proxy[methodName](missing));
+                    const colours = Object.fromEntries(ids.map((id) => [id, boot.colours[id]]));
+                    return LINUX ? new Map(Object.entries(colours)) : colours;
+                };
                 if (appApiFallbacks[methodName]) return appApiFallbacks[methodName];
                 return proxy[methodName];
             }
@@ -175,14 +195,15 @@ function createSQLiteBridge() {
 function createStorageBridge() {
     return {
         async Get(key) {
-            const { value } = await postJson('/headless/storage/get', { key });
-            return value || '';
+            return (await getHeadlessBootstrap()).storage[key] || '';
         },
         async Set(key, value) {
             await postJson('/headless/storage/set', { key, value });
+            (await getHeadlessBootstrap()).storage[key] = value;
         },
         async Remove(key) {
             const { value } = await postJson('/headless/storage/remove', { key });
+            delete (await getHeadlessBootstrap()).storage[key];
             return value;
         },
         async GetAll() {

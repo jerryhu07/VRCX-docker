@@ -33,6 +33,7 @@ import { request } from './request';
 import { runUpdateFriendFlow } from '../coordinators/friendPresenceCoordinator';
 import { runSetCurrentUserLocationFlow } from '../coordinators/locationCoordinator';
 import { watchState } from './watchState';
+import { updateHeadlessConfig } from './headlessBootstrap';
 
 import * as workerTimers from 'worker-timers';
 
@@ -107,6 +108,7 @@ function connectHeadlessEvents() {
     source.onmessage = ({ data }) => {
         try {
             const payload = JSON.parse(data);
+            if (payload.type === 'config-update') { updateHeadlessConfig(payload); return; }
             if (payload.type === 'state' && payload.state) {
                 wsState.connected = !!payload.state.websocketConnected;
                 wsState.messageCount = payload.state.websocketMessageCount || 0;

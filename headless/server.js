@@ -7,6 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 const WebSocketClient = require('ws');
+const schemas = require('./schema.json');
 const { WebSocketServer } = WebSocketClient;
 
 const rootDir = path.resolve(__dirname, '..');
@@ -177,6 +178,11 @@ function canonicalizeWatchSnapshot(snapshot, source = '') {
     }
     const { avatarName, ...profile } = normalized;
     return { ...profile, avatarName };
+}
+
+function isUiConfigKey(key) {
+    return /^(vrcx_|friendloginit_|lastuserloggedin$|enableprimarypassword$)/i.test(key) &&
+        !/(password|credential|cookie|token|apikey|secret)/i.test(key.replace(/^enableprimarypassword$/i, ''));
 }
 
 function buildWatchSnapshotDiff(previous, next, source) {
@@ -781,6 +787,16 @@ class HeadlessSession {
     }
 
     async call(className, methodName, args = []) {
+        if (className === 'AppApiElectron' && ['GetColourFromUserID', 'GetColourBulk'].includes(methodName)) {
+            const colour = (id) => {
+                if (typeof id !== 'string' || id.length > 256) throw new Error('Invalid user ID for colour');
+                const hash = crypto.createHash('md5').update(id).digest();
+                return hash.readUInt16BE(3);
+            };
+            if (methodName === 'GetColourFromUserID') return colour(args[0]);
+            if (!Array.isArray(args[0]) || args[0].length > 10000) throw new Error('Invalid user colour list');
+            return Object.fromEntries(args[0].map((id) => [id, colour(id)]));
+        }
         return await this.bridge.call(className, methodName, args);
     }
 
@@ -869,12 +885,14 @@ class HeadlessSession {
                 '@value': String(value ?? '')
             }
         );
+        if (isUiConfigKey(String(key))) this.broadcast({ type: 'config-update', key: `config:${String(key).toLowerCase()}`, value: String(value ?? '') });
     }
 
     async configRemove(key) {
         await this.sqliteNonQuery('DELETE FROM configs WHERE key = @key', {
             '@key': `config:${String(key).toLowerCase()}`
         });
+        if (isUiConfigKey(String(key))) this.broadcast({ type: 'config-update', key: `config:${String(key).toLowerCase()}`, remove: true });
     }
 
     setAuthState(authState, reason = '') {
@@ -1177,6 +1195,7 @@ class HeadlessSession {
     }
 
     async initGlobalTables() {
+        for (const sql of schemas.global) await this.sqliteNonQuery(sql);
         await this.sqliteNonQuery(
             'CREATE TABLE IF NOT EXISTS configs (`key` TEXT PRIMARY KEY, `value` TEXT)'
         );
@@ -1252,6 +1271,7 @@ class HeadlessSession {
 
     async initUserTables(userId) {
         const prefix = userPrefix(userId);
+        for (const sql of schemas.user) await this.sqliteNonQuery(sql.replaceAll('__USER_PREFIX__', prefix));
         await this.sqliteNonQuery(
             `CREATE TABLE IF NOT EXISTS ${prefix}_mutual_graph_friends (friend_id TEXT PRIMARY KEY)`
         );
@@ -2057,6 +2077,15 @@ class HeadlessSession {
         await load(false);
         await load(true);
         await this.reconcileFriendLogSnapshot(friends);
+    }
+
+    async browserBootstrap() {
+        const rows = await this.sqliteExecute('SELECT key, value FROM configs');
+        const config = Object.fromEntries(rows.filter(([key, value]) => typeof key === 'string' && typeof value === 'string' && key.startsWith('config:') && isUiConfigKey(key.slice(7))));
+        const ids = [...new Set([...(this.currentUser?.friends || []), ...this.friends.keys()])];
+        return { config, storage: parseMaybeJson(await this.call('VRCXStorage', 'GetAll')) || {},
+            colours: await this.call('AppApiElectron', 'GetColourBulk', [ids]), state: this.state(),
+            currentUser: this.loggedIn ? this.currentUserWithSessionFriendLists(this.currentUser) : null };
     }
 
     startFriendRefreshLoop() {
@@ -4896,6 +4925,12 @@ class HeadlessSession {
 }
 
 async function handleHeadlessRoute(req, res, url) {
+    if (req.method === 'GET' && url.pathname === '/headless/bootstrap') {
+        try { jsonResponse(res, 200, await session.browserBootstrap()); }
+        catch (err) { jsonResponse(res, 503, { error: safeError(err) }); }
+        return true;
+    }
+
     if (req.method === 'GET' && url.pathname === '/healthz') {
         jsonResponse(res, 200, { ok: true, state: session.state() });
         return true;
@@ -4930,6 +4965,16 @@ async function handleHeadlessRoute(req, res, url) {
 
     try {
         const body = await readJsonBody(req);
+        if (req.method === 'POST' && url.pathname === '/headless/config') {
+            if (typeof body.key !== 'string' || !isUiConfigKey(body.key)) {
+                jsonResponse(res, 400, { error: { message: 'Invalid UI configuration key' } });
+            } else {
+                if (body.remove) await session.configRemove(body.key);
+                else await session.configSet(body.key, body.value);
+                jsonResponse(res, 200, { ok: true });
+            }
+            return true;
+        }
 
         if (
             req.method === 'POST' &&
@@ -5387,6 +5432,7 @@ module.exports = {
     countMutualNetworkEdges,
     CookieJar,
     HeadlessSession,
+    isUiConfigKey,
     normalizeMutualNetworkSnapshot,
     normalizeWatchInterval,
     validateWatchUserId
