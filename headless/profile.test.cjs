@@ -137,3 +137,85 @@ test('friend list responses include cached public data while keeping current pre
     assert.deepEqual(users[0].bioLinks, ['https://example.com']);
     assert.equal(users[0].state, 'offline');
 });
+
+test('browser snapshot uses backend cache and publishes state before slow Feed work completes', async (t) => {
+    const { session } = await setup(t);
+    session.friendSnapshotOwner = 'usr_me';
+    await session.recordPublicProfile({ id: 'usr_alice', bio: 'cached bio' });
+    session.vrchatRequest = async () => assert.fail('browser snapshot requested VRChat');
+    let finish;
+    const blocked = new Promise((resolve) => { finish = resolve; });
+    session.applyFeedDiff = async () => { await blocked; return false; };
+    const events = [];
+    session.broadcast = (event) => events.push(event);
+    const update = session.mergeUser({ id: 'usr_alice', displayName: 'Alice', state: 'online' });
+    assert.equal(events[0].type, 'friend-state');
+    assert.equal(events[0].user.state, 'online');
+    const snapshot = await session.browserFriendSnapshot();
+    assert.equal(snapshot.users[0].bio, 'cached bio');
+    assert.equal(snapshot.users[0].state, 'online');
+    assert.equal(snapshot.revision, events[0].revision);
+    const staleResponse = session.applySessionFields({ id: 'usr_alice', state: 'offline', location: 'offline' });
+    assert.equal(staleResponse.state, 'online');
+    assert.equal(session.friends.get('usr_alice').state, 'online');
+    finish();
+    await update;
+});
+
+test('bulk reconnect refresh cannot overwrite newer live friend states', async (t) => {
+    const { session } = await setup(t);
+    session.applyFeedDiff = async () => false;
+    session.reconcileFriendLogSnapshot = async () => {};
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    session.vrchatRequest = async (_endpoint, options) => {
+        assert.equal(options.rawFriendSnapshot, true);
+        if (options.params.offline) return [];
+        await gate;
+        return [{ id: 'usr_alice', platform: 'standalonewindows', displayName: 'Alice' }];
+    };
+    const loading = session.loadFriendSnapshot();
+    await session.mergeUser({ id: 'usr_alice', state: 'offline' });
+    release();
+    await loading;
+    assert.equal(session.friends.get('usr_alice').state, 'offline');
+});
+
+test('bulk friends distinguish web activity from game presence', async (t) => {
+    const { session } = await setup(t);
+    session.reconcileFriendLogSnapshot = async () => {};
+    session.vrchatRequest = async (_endpoint, options) => options.params.offline
+        ? [{ id: 'usr_offline', platform: 'standalonewindows' }]
+        : [{ id: 'usr_alice', platform: 'standalonewindows' }, { id: 'usr_web', platform: 'web' }];
+    await session.loadFriendSnapshot();
+    assert.equal(session.friends.get('usr_alice').state, 'online');
+    assert.equal(session.friends.get('usr_web').state, 'active');
+    assert.equal(session.friends.get('usr_offline').state, 'offline');
+});
+
+test('cached browser snapshot remains immediate during a coalesced background refresh', async (t) => {
+    const { session } = await setup(t);
+    session.friendSnapshotOwner = 'usr_me';
+    session.friends.get('usr_alice').state = 'online';
+    session.reconcileFriendLogSnapshot = async () => {};
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let requests = 0;
+    session.vrchatRequest = async (_endpoint, options) => {
+        requests++;
+        await gate;
+        return options.params.offline ? [{ id: 'usr_alice', displayName: 'Alice', platform: '' }] : [];
+    };
+    const events = [];
+    session.broadcast = (event) => events.push(event);
+    const refresh = session.loadFriendSnapshot();
+    const overlapping = session.loadFriendSnapshot();
+    const cached = await session.browserFriendSnapshot();
+    assert.equal(cached.users[0].state, 'online');
+    assert.equal(requests, 1);
+    release();
+    await Promise.all([refresh, overlapping]);
+    assert.equal(requests, 2);
+    assert.equal((await session.browserFriendSnapshot()).users[0].state, 'offline');
+    assert.equal(events.filter((event) => event.type === 'friends-refresh').length, 1);
+});

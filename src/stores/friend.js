@@ -64,6 +64,26 @@ export const useFriendStore = defineStore('Friend', () => {
     let allUserStatsRequestId = 0;
     let allUserMutualCountRequestId = 0;
     let allUserMutualOptedOutRequestId = 0;
+    let headlessFriendGeneration = '';
+    let headlessFriendRevision = -1;
+
+    function acceptHeadlessFriendVersion(generation, revision) {
+        if (generation !== headlessFriendGeneration) {
+            if (headlessFriendGeneration && Date.parse(generation) < Date.parse(headlessFriendGeneration)) return false;
+            headlessFriendGeneration = generation;
+            headlessFriendRevision = -1;
+        }
+        if (revision < headlessFriendRevision) return false;
+        headlessFriendRevision = revision;
+        return true;
+    }
+
+    function applyHeadlessFriendState(payload) {
+        if (payload.ownerId !== userStore.currentUser.id) return;
+        if (!payload.user?.id || !acceptHeadlessFriendVersion(payload.generation, payload.revision)) return;
+        if (!friends.has(payload.user.id)) addFriend(payload.user.id, payload.user.state);
+        applyUser(payload.user);
+    }
 
     const derivedDebugCounters = reactive({
         allFavoriteFriendIds: 0,
@@ -622,20 +642,42 @@ export const useFriendStore = defineStore('Friend', () => {
     async function refreshFriends() {
         isRefreshFriendsLoading.value = true;
         try {
+            if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+                const response = await fetch('/headless/friends');
+                if (!response.ok) throw new Error(`Backend friend snapshot failed: HTTP ${response.status}`);
+                const snapshot = await response.json();
+                if (!Array.isArray(snapshot.users)) throw new Error('Invalid backend friend snapshot');
+                if (snapshot.ownerId !== userStore.currentUser.id) throw new Error('The backend account changed during friend loading');
+                if (!acceptHeadlessFriendVersion(snapshot.generation, snapshot.revision)) {
+                    isRefreshFriendsLoading.value = false;
+                    return await refreshFriends();
+                }
+                {
+                    runInSortedFriendsBatch(() => {
+                        refreshFriendsStatus({ friends: snapshot.users.map((user) => user.id),
+                            onlineFriends: snapshot.users.filter((user) => user.state === 'online').map((user) => user.id),
+                            activeFriends: snapshot.users.filter((user) => user.state === 'active').map((user) => user.id),
+                            offlineFriends: snapshot.users.filter((user) => user.state === 'offline').map((user) => user.id) });
+                        for (const user of snapshot.users) applyUser(user);
+                    });
+                }
+                isRefreshFriendsLoading.value = false;
+                return [...friends.values()].map((ctx) => ctx.ref).filter(Boolean);
+            }
             const onlineFriends = await bulkRefreshFriends({
                 offline: false
             });
             const offlineFriends = await bulkRefreshFriends({
                 offline: true
             });
-            var friends = onlineFriends.concat(offlineFriends);
-            friends = await refetchBrokenFriends(friends);
+            let result = onlineFriends.concat(offlineFriends);
+            result = await refetchBrokenFriends(result);
             if (!watchState.isFriendsLoaded) {
-                friends = await refreshRemainingFriends(friends);
+                result = await refreshRemainingFriends(result);
             }
 
             isRefreshFriendsLoading.value = false;
-            return friends;
+            return result;
         } catch (err) {
             isRefreshFriendsLoading.value = false;
             throw err;
@@ -1434,6 +1476,7 @@ export const useFriendStore = defineStore('Friend', () => {
         refreshFriendsStatus,
         addFriend,
         refreshFriends,
+        applyHeadlessFriendState,
         updateOnlineFriendCounter,
         getAllUserStats,
         getAllUserMutualCount,

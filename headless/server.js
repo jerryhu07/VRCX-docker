@@ -716,6 +716,8 @@ class HeadlessSession {
         this.profileUpdates = new Map();
         this.profileFetches = new Map();
         this.profileAttempts = new Map();
+        this.friendRevision = 0;
+        this.friendVersions = new Map();
         this.startedAt = new Date().toJSON();
         this.cookieJar = new CookieJar(this);
         this.logStreamToken = process.env.VRCX_LOG_STREAM_TOKEN || '';
@@ -2049,25 +2051,42 @@ class HeadlessSession {
     }
 
     async loadFriendSnapshot({ persistChanges = false } = {}) {
+        if (this.friendLoadInFlight) return await this.friendLoadInFlight;
+        const request = this.readFriendSnapshot({ persistChanges });
+        this.friendLoadInFlight = request;
+        try {
+            await request;
+            this.friendSnapshotOwner = this.currentUser?.id;
+            this.broadcast({ type: 'friends-refresh' });
+        } finally {
+            this.friendLoadInFlight = null;
+        }
+    }
+
+    async readFriendSnapshot({ persistChanges = false } = {}) {
         if (!this.currentUser?.id) return;
+        const revisionAtStart = this.friendRevision;
         const friends = [];
         const load = async (offline) => {
             const pageSize = 100;
             for (let offset = 0; offset < 50000; offset += pageSize) {
                 const page = await this.vrchatRequest('auth/user/friends', {
                     method: 'GET',
+                    rawFriendSnapshot: true,
                     params: {
                         offline,
                         n: pageSize,
                         offset
                     }
                 });
-                if (!Array.isArray(page) || page.length === 0) break;
+                if (!Array.isArray(page)) throw new Error('Invalid friend list response');
+                if (page.length === 0) break;
                 for (const friend of page) {
-                    friend.state = this.stateForUserId(
-                        friend.id,
-                        offline ? 'offline' : 'online'
-                    );
+                    if ((this.friendVersions.get(friend.id) || 0) > revisionAtStart) {
+                        if (this.friends.has(friend.id)) friends.push(this.friends.get(friend.id));
+                        continue;
+                    }
+                    friend.state = offline ? 'offline' : (friend.platform === 'web' ? 'active' : 'online');
                     friends.push(friend);
                     await this.mergeUser(friend, { persist: persistChanges });
                 }
@@ -2076,7 +2095,34 @@ class HeadlessSession {
         };
         await load(false);
         await load(true);
+        const seen = new Set(friends.map((user) => user.id));
+        for (const [id, user] of this.friends) {
+            if ((this.friendVersions.get(id) || 0) > revisionAtStart) {
+                if (!seen.has(id)) { friends.push(user); seen.add(id); }
+            } else if (friends.length && !seen.has(id)) {
+                this.friends.delete(id);
+                this.removeCurrentUserFriend(id);
+            }
+        }
         await this.reconcileFriendLogSnapshot(friends);
+        this.friendRevision++;
+    }
+
+    async browserFriendSnapshot() {
+        const ownerId = this.currentUser?.id;
+        if (!this.loggedIn || !ownerId) {
+            const error = new Error('The backend is not logged in.');
+            error.status = 401;
+            throw error;
+        }
+        if (this.friendSnapshotOwner !== ownerId) await this.loadFriendSnapshot();
+        const rows = await this.sqliteExecute(`SELECT user_id, profile_json FROM ${userPrefix(ownerId)}_user_profile`);
+        if (this.currentUser?.id !== ownerId) throw new Error('The backend account changed.');
+        const profiles = new Map(rows.map(([id, json]) => [id, parseMaybeJson(json)]));
+        return { ownerId, generation: this.startedAt, revision: this.friendRevision, users: [...this.friends.values()].map((user) => ({
+            ...profiles.get(user.id), ...user, isFriend: true, $lastFetch: Date.now(),
+            ...this.sessionFieldsForUser(user.id)
+        })) };
     }
 
     async browserBootstrap() {
@@ -2806,6 +2852,10 @@ class HeadlessSession {
                 this.startPipelineHeartbeat(socket);
                 this.broadcast({ type: 'state', state: this.state() });
                 console.log('VRChat Pipeline connected.');
+                if (this.pipelineHasConnected) {
+                    this.loadFriendSnapshot().catch((err) => console.warn('Friend resync after Pipeline reconnect failed:', err.message || err));
+                }
+                this.pipelineHasConnected = true;
             });
             socket.on('pong', () => {
                 socket.isAlive = true;
@@ -3051,6 +3101,8 @@ class HeadlessSession {
                 await this.recordFriendDeleted(content.userId);
                 this.removeCurrentUserFriend(content.userId);
                 this.friends.delete(content.userId);
+                this.friendVersions.set(content.userId, ++this.friendRevision);
+                this.broadcast({ type: 'friends-refresh' });
                 return true;
             case 'friend-online':
                 return await this.mergeUser(
@@ -3495,6 +3547,9 @@ class HeadlessSession {
     async mergeUser(user, { state = user.state, persist = true } = {}) {
         const diff = this.mergeFriendRecord(this.friends, user, { state });
         if (!diff || !persist) return false;
+        this.friendVersions.set(user.id, ++this.friendRevision);
+        this.broadcast({ type: 'friend-state', ownerId: this.currentUser?.id, generation: this.startedAt, revision: this.friendRevision,
+            user: { ...diff.next, isFriend: true, ...this.sessionFieldsForUser(user.id) } });
         const changed = await this.applyFeedDiff(diff);
         const fields = Object.fromEntries(['id', 'displayName', 'bio', 'bioLinks', 'iconUrl',
             'bannerType', 'bannerUrl', 'currentAvatarImageUrl', 'currentAvatarThumbnailImageUrl',
@@ -3546,15 +3601,14 @@ class HeadlessSession {
 
     applySessionFields(user, fallbackState = '') {
         if (!user?.id) return user;
-        const knownState = this.friends.get(user.id)?.state;
-        const state =
-            fallbackState ||
-            user.state ||
-            knownState ||
-            this.stateForUserId(user.id);
-        this.mergeFriendRecord(this.friends, user, { state });
+        const known = this.friends.get(user.id);
+        const presence = known ? Object.fromEntries(['state', 'location', 'worldId', 'instanceId',
+            'platform', 'travelingToLocation', 'travelingToWorld', 'travelingToInstance']
+            .filter((key) => hasOwn(known, key)).map((key) => [key, known[key]])) : {};
         return {
             ...user,
+            state: known?.state || fallbackState || user.state || this.stateForUserId(user.id),
+            ...presence,
             ...this.sessionFieldsForUser(user.id)
         };
     }
@@ -4930,7 +4984,25 @@ async function handleHeadlessRoute(req, res, url) {
         catch (err) { jsonResponse(res, 503, { error: safeError(err) }); }
         return true;
     }
-
+    if (req.method === 'POST' && url.pathname === '/headless/friends/refresh') {
+        if (!session.loggedIn) {
+            jsonResponse(res, 401, { error: { message: 'The backend is not logged in.' } });
+        } else {
+            jsonResponse(res, 202, { ok: true });
+            session.loadFriendSnapshot().catch((err) => {
+                console.warn('Browser-triggered friend refresh failed:', err.message || err);
+            });
+        }
+        return true;
+    }
+    if (req.method === 'GET' && url.pathname === '/headless/friends') {
+        try {
+            jsonResponse(res, 200, await session.browserFriendSnapshot());
+        } catch (err) {
+            jsonResponse(res, err.status || 503, { error: safeError(err) });
+        }
+        return true;
+    }
     if (req.method === 'GET' && url.pathname === '/healthz') {
         jsonResponse(res, 200, { ok: true, state: session.state() });
         return true;

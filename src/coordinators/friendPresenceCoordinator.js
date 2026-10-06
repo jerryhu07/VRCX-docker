@@ -163,6 +163,19 @@ export async function runUpdateFriendFlow(
     }
     const ref = userStore.cachedUsers.get(id);
 
+    if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+        pendingOfflineMap.delete(id);
+        ctx.pendingOffline = false;
+        ctx.ref = ref;
+        ctx.state = stateInput || ref?.state || ctx.state;
+        ctx.isVIP = localFavoriteFriends.has(id);
+        if (ref?.displayName) ctx.name = ref.displayName;
+        syncFriendSearchIndex(ctx);
+        friendStore.reindexSortedFriend(ctx);
+        friendStore.updateOnlineFriendCounter();
+        return;
+    }
+
     if (stateInput === 'online') {
         const pendingOffline = pendingOfflineMap.get(id);
         if (AppDebug.debugFriendState && pendingOffline) {

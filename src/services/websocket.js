@@ -43,6 +43,8 @@ let lastWebSocketMessage = '';
 let headlessFeedLookupTimer = null;
 let headlessGameLogLookupTimer = null;
 let headlessEventReconnectTimer = null;
+let headlessFriendLookupTimer = null;
+let headlessFriendRemoteRefreshPending = false;
 
 const headlessSessionFieldKeys = [
     '$location_at',
@@ -105,6 +107,14 @@ function connectHeadlessEvents() {
         return;
     }
     const source = new EventSource('/headless/events');
+    source.onopen = () => {
+        if (headlessEventReconnectTimer !== null) {
+            workerTimers.clearTimeout(headlessEventReconnectTimer);
+            headlessEventReconnectTimer = null;
+        }
+        scheduleHeadlessFriendLookup(true);
+        scheduleHeadlessFeedLookup();
+    };
     source.onmessage = ({ data }) => {
         try {
             const payload = JSON.parse(data);
@@ -121,8 +131,16 @@ function connectHeadlessEvents() {
                         );
                     });
                 if (payload.state.loggedIn) {
-                    scheduleHeadlessFeedLookup();
+                    scheduleHeadlessFriendLookup();
                 }
+                return;
+            }
+            if (payload.type === 'friend-state') {
+                useFriendStore().applyHeadlessFriendState(payload);
+                return;
+            }
+            if (payload.type === 'friends-refresh') {
+                scheduleHeadlessFriendLookup();
                 return;
             }
             if (payload.type === 'feed-refresh') {
@@ -158,6 +176,9 @@ function connectHeadlessEvents() {
                 const raw = JSON.stringify(payload.event);
                 wsState.messageCount++;
                 wsState.bytesReceived += raw.length;
+                // Presence is already delivered with a version by friend-state.
+                // A raw event can arrive later after slow Feed/API work finishes.
+                if (['friend-online', 'friend-active', 'friend-offline', 'friend-location', 'friend-update'].includes(payload.event.type)) return;
                 handlePipeline({
                     json: payload.event
                 });
@@ -194,6 +215,27 @@ function scheduleHeadlessEventReconnect(source) {
             connectHeadlessEvents();
         }
     }, 5000);
+}
+
+function scheduleHeadlessFriendLookup(refreshRemote = false) {
+    headlessFriendRemoteRefreshPending ||= refreshRemote;
+    if (headlessFriendLookupTimer !== null) return;
+    headlessFriendLookupTimer = workerTimers.setTimeout(() => {
+        headlessFriendLookupTimer = null;
+        if (!watchState.isLoggedIn) return;
+        const friendStore = useFriendStore();
+        if (friendStore.isRefreshFriendsLoading) {
+            scheduleHeadlessFriendLookup();
+            return;
+        }
+        const refresh = headlessFriendRemoteRefreshPending;
+        headlessFriendRemoteRefreshPending = false;
+        friendStore.refreshFriends().then(async () => {
+            if (!refresh) return;
+            const response = await fetch('/headless/friends/refresh', { method: 'POST' });
+            if (!response.ok) throw new Error(`Backend friend refresh failed: HTTP ${response.status}`);
+        }).catch((err) => console.error('Headless friend sync failed:', err));
+    }, 250);
 }
 
 function scheduleHeadlessFeedLookup() {
@@ -313,6 +355,11 @@ function connectWebSocket(token) {
  * @returns {void}
  */
 export function closeWebSocket() {
+    headlessFriendRemoteRefreshPending = false;
+    if (headlessFriendLookupTimer !== null) {
+        workerTimers.clearTimeout(headlessFriendLookupTimer);
+        headlessFriendLookupTimer = null;
+    }
     if (headlessFeedLookupTimer !== null) {
         workerTimers.clearTimeout(headlessFeedLookupTimer);
         headlessFeedLookupTimer = null;
