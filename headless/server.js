@@ -3590,9 +3590,11 @@ class HeadlessSession {
     sessionFieldsForUser(userId) {
         const ref = this.friends.get(userId);
         if (!ref) return {};
+        const observedJoin = ref.state === 'online' && ref.location === ref.observedInstanceLocation
+            ? ref.observedInstanceJoinedAt : 0;
         return {
             state: ref.state || 'offline',
-            $location_at: ref.locationAt || Date.now(),
+            $location_at: observedJoin || ref.locationAt || Date.now(),
             $travelingToTime: ref.travelingToTime || Date.now(),
             $online_for: ref.onlineFor || '',
             $offline_for: ref.offlineFor || '',
@@ -4984,6 +4986,11 @@ class HeadlessSession {
             const joined = client.players.get(key);
             if (joined?.joinTime) time = Math.max(0, now - joined.joinTime);
             client.players.delete(key);
+            const friend = this.friends.get(userId);
+            if (friend?.observedInstanceLocation === client.currentLocation) {
+                delete friend.observedInstanceLocation;
+                delete friend.observedInstanceJoinedAt;
+            }
         }
         await this.sqliteNonQuery(
             'INSERT OR IGNORE INTO gamelog_join_leave (created_at, type, display_name, location, user_id, time) VALUES (@created_at, @type, @display_name, @location, @user_id, @time)',
@@ -5038,22 +5045,11 @@ class HeadlessSession {
 
     updateFriendSameInstanceTimer(userId, displayName, joinedAt, location) {
         if (!userId || !location || !isRealInstance(location)) return;
-        const previous = this.friends.get(userId);
-        if (!previous) return;
-        this.mergeFriendRecord(
-            this.friends,
-            {
-                ...previous,
-                id: userId,
-                displayName: displayName || previous.displayName,
-                state: 'online',
-                location
-            },
-            {
-                state: 'online',
-                now: joinedAt
-            }
-        );
+        const friend = this.friends.get(userId);
+        if (!friend) return;
+        // Local player observations must not consume the API location/Feed transition.
+        friend.observedInstanceLocation = location;
+        friend.observedInstanceJoinedAt = joinedAt;
     }
 
     addSseClient(req, res) {

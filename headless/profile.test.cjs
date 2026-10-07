@@ -48,6 +48,32 @@ test('duplicate context hydration never rewinds a newer live instance', () => {
     assert.equal(client.currentLocation, 'new:1');
 });
 
+test('a game log join arriving before Pipeline must not consume the GPS transition', async (t) => {
+    const { session, db } = await setup(t);
+    session.locationNames = async () => ({ worldName: 'Room', groupName: '' });
+    session.applyFeedDiff = HeadlessSession.prototype.applyFeedDiff;
+    session.mergeFriendRecord(session.friends, { id: 'usr_alice', displayName: 'Alice', location: 'wrld_previous:1' }, { state: 'online', now: 1000 });
+    await session.mergeUser({ id: 'usr_alice', location: 'traveling' }, { state: 'online' });
+    session.updateFriendSameInstanceTimer('usr_alice', 'Alice', 4000, 'wrld_destination:2');
+    assert.equal(session.friends.get('usr_alice').location, 'traveling');
+    await session.applyPipelineEvent({ type: 'friend-location', content: { userId: 'usr_alice', location: 'wrld_destination:2',
+        user: { id: 'usr_alice', displayName: 'Alice', state: 'offline' } } });
+    const gps = db.prepare('SELECT location,previous_location FROM usrme_feed_gps').all();
+    assert.equal(gps.length, 1);
+    assert.equal(gps[0].location, 'wrld_destination:2');
+    assert.equal(gps[0].previous_location, 'wrld_previous:1');
+    assert.equal(session.sessionFieldsForUser('usr_alice').$location_at, 4000);
+});
+
+test('local observations preserve offline API presence and never overwrite the location baseline', () => {
+    const session = new HeadlessSession({});
+    session.mergeFriendRecord(session.friends, { id: 'usr_friend', location: 'offline' }, { state: 'offline', now: 1000 });
+    session.updateFriendSameInstanceTimer('usr_friend', 'Friend', 2000, 'wrld_room:1');
+    assert.equal(session.friends.get('usr_friend').state, 'offline');
+    assert.equal(session.friends.get('usr_friend').location, 'offline');
+    assert.equal(session.sessionFieldsForUser('usr_friend').$location_at, 1000);
+});
+
 test('user colours keep legacy MD5 mapping without ever calling the native bridge', async () => {
     const session = new HeadlessSession({ call: () => assert.fail('native colour call') });
     assert.equal(await session.call('AppApiElectron', 'GetColourFromUserID', ['abc']), 38972);
