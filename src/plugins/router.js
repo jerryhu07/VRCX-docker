@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 
 import { watchState } from '../services/watchState';
+import { getLoginRedirect } from '../shared/utils/loginRedirect';
 
 import FavoritesAvatar from './../views/Favorites/FavoritesAvatar.vue';
 import FavoritesFriend from './../views/Favorites/FavoritesFriend.vue';
@@ -156,7 +157,7 @@ router.beforeEach((to) => {
     }
 
     if (to.name === 'login' && watchState.isLoggedIn) {
-        return { name: 'feed' };
+        return getLoginRedirect(to.query.redirect);
     }
 
     const requiresAuth = to.matched.some((record) => record.meta?.requiresAuth);

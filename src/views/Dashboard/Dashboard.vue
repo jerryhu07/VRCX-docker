@@ -127,9 +127,9 @@
     );
 
     watch(
-        dashboard,
-        (value) => {
-            if (!value) {
+        [dashboard, () => dashboardStore.loaded],
+        ([value, loaded]) => {
+            if (!value && loaded !== false) {
                 router.replace({ name: 'feed' });
             }
         },

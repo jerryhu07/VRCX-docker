@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
     setString: vi.fn(() => Promise.resolve()),
     getString: vi.fn(() => Promise.resolve(null))
 }));
+vi.mock('../../../../stores/settings/notifications', () => ({
+    useNotificationsSettingsStore: () => ({ notificationLayout: 'table' })
+}));
 
 vi.mock('../../../../services/config', () => ({
     default: {
@@ -21,6 +24,16 @@ vi.mock('../../navMenuUtils', () => ({
 import { useNavLayout } from '../useNavLayout';
 
 describe('useNavLayout', () => {
+    it('preserves a valid deep link when navigation settings finish loading', async () => {
+        const deps = createDeps();
+        deps.router.currentRoute.value = { name: 'settings', meta: {} };
+        deps.router.hasRoute = (name) => name === 'settings';
+        const layout = useNavLayout({ t: (key) => key, locale: deps.locale, router: deps.router,
+            dashboardStore: deps.dashboardStore, dashboards: deps.dashboards,
+            directAccessPaste: deps.directAccessPaste });
+        await layout.loadNavMenuConfig();
+        expect(deps.push).not.toHaveBeenCalled();
+    });
     const createDeps = () => {
         const push = vi.fn();
         const router = {

@@ -201,6 +201,12 @@ export function useNavLayout({
         if (hasNavigatedToInitialRoute) {
             return;
         }
+        // Loading navigation must not override an existing deep link or a restored route.
+        const currentName = router.currentRoute.value?.name;
+        if (currentName && currentName !== 'login' && router.hasRoute?.(currentName)) {
+            hasNavigatedToInitialRoute = true;
+            return;
+        }
         const firstEntry = getFirstNavEntryLocal(navLayout.value);
         if (!firstEntry) {
             return;

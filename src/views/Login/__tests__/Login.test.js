@@ -3,6 +3,8 @@ import { createI18n } from 'vue-i18n';
 import { createTestingPinia } from '@pinia/testing';
 import { mount } from '@vue/test-utils';
 import { ref } from 'vue';
+import { useRouter } from 'vue-router';
+import { watchState } from '../../../services/watchState';
 
 vi.mock('../../../views/Feed/Feed.vue', () => ({
     default: { template: '<div />' }
@@ -181,6 +183,23 @@ function mountLogin(storeOverrides = {}) {
 describe('Login.vue', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+    });
+
+    test('redirects when authentication completed before the login page mounted', () => {
+        const replace = vi.fn();
+        const originalRouter = vi.mocked(useRouter).getMockImplementation();
+        vi.mocked(useRouter).mockImplementation(() => ({ replace, push: vi.fn(),
+            currentRoute: ref({ path: '/login', name: 'login', meta: {} }) }));
+        watchState.isLoggedIn = true;
+        let wrapper;
+        try {
+            wrapper = mountLogin();
+            expect(replace).toHaveBeenCalledWith('/feed');
+        } finally {
+            wrapper?.unmount();
+            watchState.isLoggedIn = false;
+            vi.mocked(useRouter).mockImplementation(originalRouter);
+        }
     });
 
     describe('form rendering', () => {

@@ -219,6 +219,7 @@
     import configRepository from '../../services/config';
     import { useUserDisplay } from '../../composables/useUserDisplay';
     import { watchState } from '../../services/watchState';
+    import { getLoginRedirect } from '../../shared/utils/loginRedirect';
 
     import LoginSettingsDialog from './Dialog/LoginSettingsDialog.vue';
 
@@ -305,11 +306,7 @@
      *
      */
     function postLoginRedirect() {
-        const redirect = route.query.redirect;
-        if (typeof redirect === 'string' && redirect.startsWith('/') && redirect !== '/login') {
-            return redirect;
-        }
-        return '/feed';
+        return getLoginRedirect(route.query.redirect);
     }
 
     watch(
@@ -318,7 +315,8 @@
             if (isLoggedIn) {
                 router.replace(postLoginRedirect());
             }
-        }
+        },
+        { immediate: true }
     );
 
     watch(
