@@ -292,3 +292,32 @@ test('closing a loading user dialog cannot be undone by a late profile response'
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await expect(page.locator('[data-slot="dialog-content"]')).toHaveCount(0);
 });
+
+test('player list renders backend snapshot and processes live joins/leaves without database replay', async ({ page }) => {
+    const id = 'usr_00000000-0000-4000-8000-000000000001';
+    const snapshot = { ownerId: bootstrap.currentUser.id, location: '', name: '', date: 1000,
+        players: [{ userId: id, displayName: 'Snapshot Player', joinTime: 1234 }] };
+    const state = { ...bootstrap.state, playerList: snapshot };
+    await page.route('**/headless/events', (route) => route.fulfill({ contentType: 'text/event-stream',
+        body: `data: ${JSON.stringify({ type: 'state', state })}\n\n` }));
+    await page.addInitScript(() => {
+        window.EventSource = class {
+            constructor() { window.__playerListEvents = this; }
+            close() {}
+        };
+    });
+    await open(page, 'player-list', { width: 390, height: 844 });
+    await expect.poll(() => page.evaluate(() => !!window.__playerListEvents?.onmessage)).toBe(true);
+    const send = (value) => page.evaluate((state) => window.__playerListEvents.onmessage({
+        data: JSON.stringify({ type: 'state', state })
+    }), value);
+    await send(state);
+    const rows = page.locator('.main-page-panel tbody tr[data-row-id]');
+    await expect(rows.filter({ hasText: 'Snapshot Player' })).toHaveCount(1);
+    await expect(rows.filter({ hasText: 'Snapshot Player' })).toHaveAttribute('data-row-id', `${id}:Snapshot Player`);
+    await send({ ...state, playerList: { ...snapshot, players: [...snapshot.players,
+        { userId: '', displayName: 'Name Only Player', joinTime: 2000 }] } });
+    await expect(rows).toHaveCount(2);
+    await send({ ...state, playerList: { ...snapshot, players: [] } });
+    await expect(rows).toHaveCount(0);
+});

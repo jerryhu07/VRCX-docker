@@ -45,6 +45,7 @@ import { useUiStore } from './ui';
 import { useUserStore } from './user';
 import { useWorldStore } from './world';
 import { watchState } from '../services/watchState';
+import { logStreamState } from '../services/logStreamClient';
 
 import configRepository from '../services/config';
 
@@ -1388,9 +1389,6 @@ export const useInstanceStore = defineStore('Instance', () => {
             }
             for (const player of playersInInstance.values()) {
                 // if friend isn't in instance add them
-                if (player.displayName === userStore.currentUser.displayName) {
-                    continue;
-                }
                 const addUser = !users.some(function (user) {
                     return player.displayName === user.displayName;
                 });
@@ -1399,15 +1397,15 @@ export const useInstanceStore = defineStore('Instance', () => {
                     if (typeof ref !== 'undefined') {
                         pushUser(ref);
                     } else {
-                        let { joinTime } =
-                            locationStore.lastLocation.playerList.get(
-                                player.userId
-                            );
+                        let { joinTime } = player;
                         if (!joinTime) {
                             joinTime = Date.now();
                         }
                         ref = {
                             // if userId is missing just push displayName
+                            id: player.userId || undefined,
+                            $moderations: {},
+                            isFriend: friendStore.friends.has(player.userId),
                             displayName: player.displayName,
                             $location_at: joinTime,
                             $online_for: joinTime
@@ -1419,6 +1417,16 @@ export const useInstanceStore = defineStore('Instance', () => {
         }
         currentInstanceUsersData.value = users;
     }
+
+    watch([() => logStreamState.playerList, () => watchState.isFriendsLoaded, () => userStore.currentUser?.id],
+        ([snapshot]) => {
+            if (!window.__VRCX_HEADLESS__ || snapshot === undefined) return;
+            if (snapshot?.ownerId && snapshot.ownerId !== userStore.currentUser?.id) return;
+            const previousLocation = locationStore.lastLocation.location;
+            locationStore.applyHeadlessPlayerList(snapshot, friendStore.friends);
+            if (previousLocation !== locationStore.lastLocation.location) updateCurrentInstanceWorld();
+            getCurrentInstanceUserList();
+        }, { immediate: true });
 
     // $app.methods.instanceQueueClear = function () {
     //     // remove all instances from queue

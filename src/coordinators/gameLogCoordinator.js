@@ -48,6 +48,7 @@ import * as workerTimers from 'worker-timers';
  * locationStore, instanceStore, vrStore, and userStore.
  */
 export async function tryLoadPlayerList() {
+    if (window.__VRCX_HEADLESS__) return;
     const gameStore = useGameStore();
     const locationStore = useLocationStore();
     const userStore = useUserStore();

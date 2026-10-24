@@ -276,6 +276,7 @@ test('user requests combine upstream public profile fields and reject partial fe
 
 test('old duplicate log events acknowledge progress without replacing latest activity', async () => {
     const session = createSession();
+    session.sqliteExecute = async () => [];
     session.persistLogStreamClient = async () => {};
     session.persistLogStreamEvent = async (_machineId, event) => event.id !== 'duplicate';
     session.applyLogStreamEvent = async () => false;

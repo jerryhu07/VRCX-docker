@@ -772,6 +772,7 @@ class HeadlessSession {
             websocketDomain: this.websocketDomain,
             browserClients: this.clients.size,
             friendCacheSize: this.friends.size,
+            playerList: this.playerListSnapshot(),
             logStream: {
                 tokenConfigured: !!this.logStreamToken,
                 clients: Array.from(this.logStreamClients.values()).map(
@@ -4356,7 +4357,10 @@ class HeadlessSession {
                 const events = await this.sqliteExecute('SELECT data FROM headless_log_stream_events WHERE file_name = @file_name ORDER BY file_offset',
                     { '@file_name': client.currentFile });
                 for (const [data] of events) {
-                    try { const event = JSON.parse(data); if (event && typeof event === 'object') this.hydrateLogStreamContext(client, event); }
+                    try { const event = JSON.parse(data); if (event && typeof event === 'object') {
+                        this.hydrateLogStreamContext(client, event);
+                        this.hydrateLogStreamContext(client.liveInstance, event);
+                    } }
                     catch { console.warn('Skipping malformed stored log stream context.'); }
                 }
             }
@@ -4383,10 +4387,29 @@ class HeadlessSession {
                 currentWorldName: '',
                 destinationLocation: '',
                 players: new Map(),
+                liveInstance: { players: new Map() },
+                fileContexts: new Map(),
                 sockets: new Set()
             });
         }
         return this.logStreamClients.get(key);
+    }
+
+    playerListSnapshot(now = Date.now()) {
+        const client = [...this.logStreamClients.values()]
+            .filter((item) => item.connected && item.vrchatRunning !== false &&
+                now - (Date.parse(item.lastSeenAt) || 0) < 45000 && item.machineId !== 'codex-smoke')
+            .sort((a, b) => (Date.parse(b.lastSeenAt) || 0) - (Date.parse(a.lastSeenAt) || 0))[0];
+        const context = client?.liveInstance;
+        if (!context?.currentLocation || (context.contextFile && client.currentFile && context.contextFile !== client.currentFile)) return null;
+        const players = new Map(context.players);
+        if (this.currentUser?.id && !players.has(this.currentUser.id)) {
+            players.set(this.currentUser.id, { userId: this.currentUser.id,
+                displayName: this.selfDisplayName(), joinTime: context.currentLocationAt });
+        }
+        return { ownerId: this.currentUser?.id || '', machineId: client.machineId,
+            location: context.currentLocation, name: context.currentWorldName || '',
+            date: context.currentLocationAt || null, players: [...players.values()] };
     }
 
     async persistLogStreamClient(client) {
@@ -4516,6 +4539,33 @@ class HeadlessSession {
 
     async handleLogStreamEvents(machineId, events) {
         const client = this.getLogStreamClient(machineId);
+        const pending = (client.ingestQueue || Promise.resolve()).then(() => this.ingestLogStreamEvents(machineId, events));
+        client.ingestQueue = pending.catch(() => {});
+        return pending;
+    }
+
+    async logEventContext(client, event) {
+        const file = event.file || event.fileName || '';
+        if (!file) return client;
+        const offset = Number(event.offset || event.fileOffset || 0);
+        let context = client.fileContexts.get(file);
+        if (!context || (offset > 0 && offset <= (context.fileOffset || 0))) {
+            context = { players: new Map(), fileOffset: 0 };
+            // Reconstruct only this file's prefix, never another file or the live tail.
+            if (offset > 0) {
+                const rows = await this.sqliteExecute(
+                    'SELECT data FROM headless_log_stream_events WHERE file_name = @file AND file_offset < @offset ORDER BY file_offset',
+                    { '@file': file, '@offset': offset }
+                );
+                for (const [data] of rows) this.hydrateLogStreamContext(context, JSON.parse(data));
+            }
+            client.fileContexts.set(file, context);
+        }
+        return context;
+    }
+
+    async ingestLogStreamEvents(machineId, events) {
+        const client = this.getLogStreamClient(machineId);
         const checkpoints = {};
         let accepted = 0;
         let duplicate = 0;
@@ -4528,6 +4578,9 @@ class HeadlessSession {
                     machineId,
                     event
                 );
+                // Keep live UI context independent of historical backfill database writes.
+                this.hydrateLogStreamContext(client.liveInstance, event);
+                const context = await this.logEventContext(client, event);
                 const fileName = event.file || event.fileName || '';
                 const fileOffset = Number(
                     event.offset || event.fileOffset || 0
@@ -4537,7 +4590,8 @@ class HeadlessSession {
                 }
                 if (!inserted) {
                     duplicate++;
-                    this.hydrateLogStreamContext(client, event);
+                    this.hydrateLogStreamContext(context, event);
+                    context.fileOffset = fileOffset;
                     continue;
                 }
                 const loggedAt = event.loggedAt || event.dt || new Date().toJSON();
@@ -4547,10 +4601,11 @@ class HeadlessSession {
                     client.lastEventAt = loggedAt;
                 }
                 accepted++;
-                if (await this.applyLogStreamEvent(machineId, event)) {
+                if (await this.applyLogStreamEvent(machineId, event, context)) {
                     changed = true;
                 }
-                client.contextEventAt = Math.max(client.contextEventAt || 0, Date.parse(loggedAt) || 0);
+                this.hydrateLogStreamContext(context, event);
+                context.fileOffset = fileOffset;
             } catch (err) {
                 failed++;
                 client.lastError = err.message || String(err);
@@ -4566,6 +4621,10 @@ class HeadlessSession {
         client.failedCount += failed;
         client.connected = true;
         client.lastSeenAt = new Date().toJSON();
+        for (const key of ['currentLocation', 'currentLocationAt', 'currentLocationCreatedAt', 'currentWorldName', 'destinationLocation', 'contextEventAt']) {
+            client[key] = client.liveInstance[key] || (key.endsWith('At') ? 0 : '');
+        }
+        client.players = new Map(client.liveInstance.players);
         await this.persistLogStreamClient(client);
         this.broadcast({ type: 'state', state: this.state() });
         if (changed) {
@@ -4634,7 +4693,15 @@ class HeadlessSession {
         const createdAt = event.loggedAt || event.dt || rawLog[1];
         const at = Date.parse(createdAt) || 0;
         if (!at || at < (client.contextEventAt || 0)) return;
+        const file = event.file || event.fileName || '';
+        if (file && client.contextFile && file !== client.contextFile) {
+            client.currentLocation = '';
+            client.currentWorldName = '';
+            client.currentLocationAt = 0;
+            client.players.clear();
+        }
         client.contextEventAt = at;
+        client.contextFile = file || client.contextFile || '';
         if (type === 'location') {
             client.currentLocation = args[0] || '';
             client.currentWorldName = args[1] || '';
@@ -4642,12 +4709,21 @@ class HeadlessSession {
             client.currentLocationAt = at;
             client.players.clear();
         } else if (type === 'location-destination') {
+            if (client.currentLocation) client.previousLocation = {
+                currentLocation: client.currentLocation, currentLocationAt: client.currentLocationAt,
+                currentLocationCreatedAt: client.currentLocationCreatedAt, players: new Map(client.players), closedAt: at
+            };
             client.destinationLocation = args[0] || '';
             client.currentLocation = '';
-        } else if (type === 'OnPlayerJoined') {
+            client.players.clear();
+        } else if (type === 'player-joined' || type === 'OnPlayerJoined') {
             client.players.set(args[1] || args[0], { displayName: args[0] || '', userId: args[1] || '', joinTime: at });
-        } else if (type === 'OnPlayerLeft') {
+        } else if (type === 'player-left' || type === 'OnPlayerLeft') {
             client.players.delete(args[1] || args[0]);
+            if (args[1] && args[1] === this.currentUser?.id) {
+                client.currentLocation = '';
+                client.players.clear();
+            }
         }
     }
 
@@ -4846,14 +4922,14 @@ class HeadlessSession {
         return changed;
     }
 
-    async applyLogStreamEvent(machineId, event) {
+    async applyLogStreamEvent(machineId, event, context = this.getLogStreamClient(machineId)) {
         const rawLog = Array.isArray(event.rawLog) ? event.rawLog : [];
         const parsed = event.parsed || {};
         const type = parsed.type || rawLog[2] || '';
         const args = Array.isArray(parsed.args) ? parsed.args : rawLog.slice(3);
         const createdAt =
             event.loggedAt || event.dt || rawLog[1] || new Date().toJSON();
-        const client = this.getLogStreamClient(machineId);
+        const client = context;
 
         switch (type) {
             case 'location': {
@@ -4896,6 +4972,10 @@ class HeadlessSession {
                 return true;
             }
             case 'location-destination':
+                if (client.currentLocation) client.previousLocation = {
+                    currentLocation: client.currentLocation, currentLocationAt: client.currentLocationAt,
+                    currentLocationCreatedAt: client.currentLocationCreatedAt, players: new Map(client.players), closedAt: Date.parse(createdAt)
+                };
                 client.destinationLocation = args[0] || '';
                 await this.closePreviousStreamLocation(client, createdAt);
                 client.currentLocation = '';
@@ -4911,13 +4991,20 @@ class HeadlessSession {
                     'OnPlayerJoined',
                     args
                 );
-            case 'player-left':
+            case 'player-left': {
+                let leftContext = client;
+                if (args[1] === this.currentUser?.id) {
+                    const previous = client.previousLocation;
+                    if (client.currentLocation) await this.closePreviousStreamLocation(client, createdAt);
+                    else if (previous && Date.parse(createdAt) >= previous.closedAt && Date.parse(createdAt) - previous.closedAt <= 30000) leftContext = previous;
+                }
                 return await this.addStreamJoinLeave(
-                    client,
+                    leftContext,
                     createdAt,
                     'OnPlayerLeft',
                     args
                 );
+            }
             case 'portal-spawn':
                 await this.sqliteNonQuery(
                     'INSERT OR IGNORE INTO gamelog_portal_spawn (created_at, display_name, location, user_id, instance_id, world_name) VALUES (@created_at, @display_name, @location, @user_id, @instance_id, @world_name)',
@@ -4948,6 +5035,7 @@ class HeadlessSession {
     async closePreviousStreamLocation(client, nextCreatedAt) {
         if (!client.currentLocation || !client.currentLocationAt) return;
         const nextTime = Date.parse(nextCreatedAt) || Date.now();
+        if (nextTime < client.currentLocationAt) return;
         const time = Math.max(0, nextTime - client.currentLocationAt);
         if (isRealInstance(client.currentLocation)) {
             await this.addStreamSelfLeft(client, nextCreatedAt, time);
