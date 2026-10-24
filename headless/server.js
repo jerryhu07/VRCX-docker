@@ -5545,6 +5545,13 @@ async function handleHeadlessRoute(req, res, url) {
             req.method === 'POST' &&
             url.pathname === '/headless/sqlite/executeNonQuery'
         ) {
+            // Legacy browser cache writers span BEGIN/COMMIT across HTTP calls.
+            // Never let a closed tab hold the collector's connection in a transaction.
+            // Browser cache writes use autocommit; backend-owned transactions remain atomic.
+            if (/^\s*(?:BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(body.sql || '')) {
+                jsonResponse(res, 200, { value: 0 });
+                return true;
+            }
             jsonResponse(res, 200, {
                 value: await session.sqliteNonQuery(body.sql, body.args || null)
             });
