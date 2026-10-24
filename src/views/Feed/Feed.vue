@@ -163,16 +163,16 @@
      * @param row
      */
     function getFeedRowId(row) {
-        if (row?.id != null) return `id:${row.id}`;
-        if (row?.rowId != null) return `row:${row.rowId}`;
-
         const type = row?.type ?? '';
+        if (row?.id != null) return `${type}:id:${row.id}`;
+        if (row?.rowId != null) return `${type}:row:${row.rowId}`;
         const createdAt = row?.created_at ?? row?.createdAt ?? '';
         const userId = row?.userId ?? row?.senderUserId ?? '';
         const location = row?.location ?? row?.details?.location ?? '';
         const message = row?.message ?? '';
 
-        return `${type}:${createdAt}:${userId}:${location}:${message}:${Date.now()}`;
+        return JSON.stringify([type, createdAt, userId, location, message,
+            row?.status, row?.statusDescription, row?.bio, row?.currentAvatarImageUrl]);
     }
 
     const { table, pagination } = useVrcxVueTable({

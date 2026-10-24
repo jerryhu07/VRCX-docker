@@ -10,7 +10,8 @@ const mocks = vi.hoisted(() => ({
     filteredRows: [{ id: 'r1' }],
     tablePageSizes: [10, 25, 50],
     tablePageSize: 25,
-    maxTableSize: 100
+    maxTableSize: 100,
+    getRowId: null
 }));
 
 mocks.feedTable = mocks.makeRef({
@@ -59,12 +60,12 @@ vi.mock('../../../stores', () => ({
 }));
 
 vi.mock('../../../lib/table/useVrcxVueTable', () => ({
-    useVrcxVueTable: () => ({
+    useVrcxVueTable: (options) => { mocks.getRowId = options.getRowId; return {
         table: {
             getFilteredRowModel: () => ({ rows: mocks.filteredRows })
         },
         pagination: mocks.pagination
-    })
+    }; }
 }));
 
 vi.mock('../columns.jsx', () => ({
@@ -168,6 +169,13 @@ function clickButtonByText(wrapper, text) {
 }
 
 describe('Feed.vue', () => {
+    test('row identities are stable across refreshes and distinct across event tables', () => {
+        const wrapper = mount(Feed);
+        const row = { type: 'GPS', created_at: '2026-10-19T00:00:00Z', userId: 'usr_test', location: 'world:1' };
+        expect(mocks.getRowId(row)).toBe(mocks.getRowId({ ...row }));
+        expect(mocks.getRowId({ id: 1, type: 'GPS' })).not.toBe(mocks.getRowId({ id: 1, type: 'Bio' }));
+        wrapper.unmount();
+    });
     beforeEach(() => {
         mocks.feedTable.value = {
             loading: false,
@@ -251,8 +259,8 @@ describe('Feed.vue', () => {
             message: 'hello'
         });
 
-        expect(key).toBe(
-            'Online:2026-03-01T00:00:00.000Z:usr_123:wrld_abc:hello'
-        );
+        expect(JSON.parse(key).slice(0, 5)).toEqual([
+            'Online', '2026-03-01T00:00:00.000Z', 'usr_123', 'wrld_abc', 'hello'
+        ]);
     });
 });
