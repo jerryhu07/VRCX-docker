@@ -1,5 +1,5 @@
 <template>
-    <div id="chart" class="x-container">
+    <div id="chart" class="x-container portrait-tools">
         <div class="options-container">
             <span class="header">{{ t('view.tools.header') }}</span>
 

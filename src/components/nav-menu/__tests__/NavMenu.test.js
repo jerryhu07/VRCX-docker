@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
+vi.mock('../../../stores/settings/notifications', () => ({
+    useNotificationsSettingsStore: () => ({ notificationLayout: 'table' })
+}));
 
 const mocks = vi.hoisted(() => ({
     routerPush: vi.fn(() => Promise.resolve()),

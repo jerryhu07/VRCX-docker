@@ -1,5 +1,5 @@
 <template>
-    <div class="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
+    <div class="portrait-watch-list flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
         <header class="flex shrink-0 flex-wrap items-center gap-3 border-b px-4 py-3">
             <div class="min-w-0 w-full xl:flex-1">
                 <h1 class="text-base font-semibold">{{ t('view.watch_list.header') }}</h1>
@@ -25,8 +25,12 @@
             </form>
         </header>
 
-        <div class="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
-            <aside class="flex min-h-0 flex-col border-b lg:border-r lg:border-b-0">
+        <NativeSelect v-if="isPortrait" :model-value="selectedUserId" class="m-2 w-auto" :aria-label="t('view.watch_list.user_id')" @update:model-value="selectUser">
+            <NativeSelectOption value="">{{ t('view.watch_list.all_changes') }}</NativeSelectOption>
+            <NativeSelectOption v-for="item in items" :key="item.userId" :value="item.userId">{{ item.displayName || item.userId }}</NativeSelectOption>
+        </NativeSelect>
+        <div class="portrait-watch-grid grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
+            <aside v-show="!isPortrait" class="flex min-h-0 flex-col border-b lg:border-r lg:border-b-0">
                 <div class="flex items-center gap-2 border-b px-3 py-2">
                     <Input v-model="filter" class="h-8" :placeholder="t('view.watch_list.search')" />
                     <Button
@@ -174,7 +178,7 @@
                                         <div class="border-b bg-muted/60 px-3 py-1.5 font-sans font-medium">
                                             {{ entry.path }}
                                         </div>
-                                        <div class="overflow-x-auto">
+                                        <div class="portrait-json overflow-x-auto">
                                             <div
                                                 v-for="(line, lineIndex) in diffLines(entry)"
                                                 :key="`${line.kind}-${lineIndex}`"
@@ -212,6 +216,8 @@
 
 <script setup>
     import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
     import { toast } from 'vue-sonner';
     import { Activity, ChevronRight, MoreVertical, Plus, RefreshCw, Trash2, Users } from 'lucide-vue-next';
     import { useI18n } from 'vue-i18n';

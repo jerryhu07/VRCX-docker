@@ -1,8 +1,8 @@
 <template>
-    <div id="chart" class="x-container">
+    <div id="chart" class="portrait-chart x-container">
         <div ref="instanceActivityRef" class="pt-12">
             <BackToTop :target="instanceActivityRef" :right="30" :bottom="30" :teleport="false" />
-            <div class="options-container flex items-center justify-between mt-0">
+            <div class="portrait-toolbar options-container flex items-center justify-between mt-0">
                 <div class="flex items-center justify-between">
                     <span class="shrink-0">{{ t('view.charts.instance_activity.header') }}</span>
                     <HoverCard>
@@ -181,6 +181,9 @@
     defineOptions({ name: 'ChartsInstance' });
 
     import { computed, nextTick, onBeforeMount, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
+    watch(isPortrait, async () => { await nextTick(); if (echartsInstance) initEcharts(); });
     import { ArrowLeft, ArrowRight, Calendar as CalendarIcon, Info, RefreshCcw, Settings } from 'lucide-vue-next';
     import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
     import { fromDate, getLocalTimeZone, today } from '@internationalized/date';
@@ -618,13 +621,17 @@
             },
             grid: {
                 top: 50,
-                left: 160,
-                right: 90
+                left: isPortrait.value ? 100 : 160,
+                right: isPortrait.value ? 16 : 90,
+                bottom: isPortrait.value ? 64 : 60
             },
+            dataZoom: isPortrait.value ? [{ type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 20, bottom: 8 }] : [],
             yAxis: {
                 type: 'category',
                 axisLabel: {
                     interval: 0,
+                    width: isPortrait.value ? 88 : undefined,
+                    overflow: 'truncate',
                     rich: {
                         filtered: {
                             opacity: 0.4
@@ -647,6 +654,7 @@
                 interval: 3 * 60 * 60 * 1000,
                 axisLine: { show: true },
                 axisLabel: {
+                    hideOverlap: true,
                     formatter: (value) => dayjs(value).utc().format(format)
                 },
                 splitLine: { lineStyle: { type: 'dashed' } }

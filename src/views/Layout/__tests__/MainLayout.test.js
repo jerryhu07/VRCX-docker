@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
     setNavWidth: vi.fn()
 }));
 
+vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key) => key }) }));
+
 vi.mock('pinia', async (i) => ({ ...(await i()), storeToRefs: (s) => s }));
 vi.mock('vue-router', async (importOriginal) => {
     const actual = await importOriginal();

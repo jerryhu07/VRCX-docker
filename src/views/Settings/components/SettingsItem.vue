@@ -1,5 +1,5 @@
 <template>
-    <div class="flex items-center justify-between gap-6 min-h-8">
+    <div class="portrait-setting-item flex items-center justify-between gap-6 min-h-8">
         <div class="flex flex-col gap-0.5 min-w-0 flex-1">
             <span class="text-sm leading-snug text-foreground">{{ label }}</span>
             <span v-if="description" class="text-xs leading-tight text-muted-foreground">{{ description }}</span>

@@ -1,5 +1,5 @@
 <template>
-    <div class="mb-2 flex shrink-0 flex-wrap items-center gap-3 border-b pb-2 text-xs">
+    <div class="log-stream-status mb-2 flex shrink-0 flex-wrap items-center gap-3 border-b pb-2 text-xs">
         <span role="status" class="inline-flex items-center gap-1.5" :title="client?.machineId || ''">
             <span class="size-2 rounded-full" :class="online ? 'bg-emerald-500' : 'bg-muted-foreground/50'"></span>
             {{ t(online ? 'view.game_log.stream.online' : 'view.game_log.stream.offline') }}

@@ -68,6 +68,7 @@
         <!-- Reka's overlay prevents pointerdown; content must not be its descendant. -->
         <div class="pointer-events-auto fixed inset-0 z-50 grid place-items-center overflow-y-auto">
             <DialogContent
+                data-slot="dialog-scroll-content"
                 :class="
                     cn(
                         'relative z-50 grid w-full max-w-lg my-8 gap-4 border border-border bg-background p-6 shadow-lg duration-200 sm:rounded-lg md:w-full',
@@ -90,7 +91,7 @@
                     <DialogDescription />
                 </VisuallyHidden>
 
-                <DialogClose class="absolute top-4 right-4 p-0.5 transition-colors rounded-md hover:bg-secondary">
+                <DialogClose data-slot="dialog-close" class="absolute top-4 right-4 p-0.5 transition-colors rounded-md hover:bg-secondary">
                     <X class="w-4 h-4" />
                     <span class="sr-only">Close</span>
                 </DialogClose>

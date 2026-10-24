@@ -1,5 +1,5 @@
 <template>
-    <div class="x-container flex h-full min-h-0 flex-col gap-3 py-3">
+    <div class="x-container portrait-dashboard flex h-full min-h-0 flex-col gap-3 py-3">
         <DashboardEditToolbar
             v-if="isEditing"
             v-model:name="editName"
@@ -9,7 +9,7 @@
 
         <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
             <template v-if="displayRows.length && !isEditing">
-                <ResizablePanelGroup direction="vertical" :auto-save-id="`dashboard-${id}`" class="flex-1 min-h-0">
+                <ResizablePanelGroup direction="vertical" :auto-save-id="isPortrait ? undefined : `dashboard-${id}`" class="flex-1 min-h-0">
                     <template v-for="(row, rowIndex) in displayRows" :key="rowIndex">
                         <ResizablePanel :default-size="100 / displayRows.length" :min-size="10">
                             <DashboardRow
@@ -84,6 +84,8 @@
 
 <script setup>
     import { computed, ref, watch } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
     import { Plus } from 'lucide-vue-next';
     import { toast } from 'vue-sonner';
     import { useI18n } from 'vue-i18n';

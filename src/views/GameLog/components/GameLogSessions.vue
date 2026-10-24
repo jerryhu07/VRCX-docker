@@ -1,6 +1,6 @@
 <template>
     <div class="flex h-full flex-col overflow-hidden">
-        <div class="flex shrink-0 items-center gap-2 border-b border-border px-0 pb-4">
+        <div class="portrait-toolbar flex shrink-0 items-center gap-2 border-b border-border px-0 pb-4">
             <div class="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto whitespace-nowrap">
                 <slot name="leading" />
 
@@ -39,7 +39,7 @@
                             :locale="locale"
                             :max-value="todayDate"
                             :maximum-days="sessionsDateRangeMaxDays"
-                            :number-of-months="2"
+                            :number-of-months="isPortrait ? 1 : 2"
                             :week-starts-on="weekStartsOn"
                             :is-date-unavailable="isDateUnavailable" />
                         <div class="mt-3 flex justify-end gap-2">
@@ -71,7 +71,7 @@
 
             <InputGroupField
                 :model-value="sessionsSearch"
-                class="w-60 shrink-0"
+                class="portrait-search w-60 shrink-0"
                 :placeholder="t('view.game_log.search_placeholder')"
                 clearable
                 @update:modelValue="handleSessionsSearchInput"
@@ -122,6 +122,8 @@
 
 <script setup>
     import { computed, nextTick, ref, watch } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
     import { useInfiniteScroll, useIntersectionObserver } from '@vueuse/core';
     import { storeToRefs } from 'pinia';
     import { useI18n } from 'vue-i18n';

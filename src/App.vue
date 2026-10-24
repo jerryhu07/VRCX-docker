@@ -5,7 +5,7 @@
         <div
             id="x-app"
             class="flex w-screen h-screen overflow-hidden cursor-default [&>.x-container]:pt-[15px]"
-            :class="{ 'pt-7': isMacOS }">
+            :class="{ 'pt-7': isMacOS && !isPortrait }">
             <RouterView></RouterView>
             <Toaster position="top-center" :theme="theme"></Toaster>
 
@@ -42,10 +42,14 @@
     import VRCXUpdateDialog from './components/dialogs/VRCXUpdateDialog.vue';
 
     import '@/styles/globals.css';
+    import '@/styles/portrait.css';
+    import { usePortraitLayout } from './composables/usePortraitLayout';
+
+    const { isPortrait } = usePortraitLayout();
 
     console.log(`isLinux: ${LINUX}`);
 
-    const isMacOS = computed(() => navigator.platform.includes('Mac'));
+    const isMacOS = computed(() => !window.__VRCX_HEADLESS__ && navigator.platform.includes('Mac'));
 
     const theme = computed(() => {
         return store.appearanceSettings.isDarkMode ? 'dark' : 'light';

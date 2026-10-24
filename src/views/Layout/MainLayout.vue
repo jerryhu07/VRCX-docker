@@ -10,22 +10,23 @@
                 <NavMenu />
 
                 <div
-                    v-show="sidebarOpen"
+                    v-show="sidebarOpen && !isPortrait"
                     class="absolute top-0 bottom-0 z-30 w-1 cursor-ew-resize select-none"
                     :style="{ left: 'var(--sidebar-width)' }"
                     @pointerdown.prevent="startNavResize" />
 
                 <SidebarInset class="min-w-0 bg-sidebar">
+                    <PortraitHeader v-model:friends-open="friendsOpen" />
                     <ResizablePanelGroup
                         direction="horizontal"
-                        auto-save-id="vrcx-main-layout-right-sidebar"
+                        :auto-save-id="isPortrait ? undefined : 'vrcx-main-layout-right-sidebar'"
                         :class="[
                             'group/main-layout flex-1 h-full min-w-0',
                             { 'aside-collapsed': isAsideCollapsedStatic }
                         ]"
-                        @layout="handleLayout">
+                        @layout="onLayout">
                         <template #default="{ layout }">
-                            <ResizablePanel :default-size="mainDefaultSize" :order="1">
+                            <ResizablePanel :default-size="mainDefaultSize" :order="1" class="main-page-panel" :data-route="router.currentRoute.value.fullPath">
                                 <RouterView v-slot="{ Component }">
                                     <KeepAlive exclude="ChartsInstance, ChartsMutual">
                                         <component :is="Component" />
@@ -34,6 +35,7 @@
                             </ResizablePanel>
 
                             <ResizableHandle
+                                v-show="!isPortrait"
                                 with-handle
                                 :class="[
                                     isAsideCollapsed(layout) ? 'opacity-100' : 'opacity-0',
@@ -47,11 +49,23 @@
                                 collapsible
                                 :order="2"
                                 :style="{ maxWidth: `${asideMaxPx}px` }">
-                                <Sidebar></Sidebar>
+                                <div ref="asideDesktopTarget" class="h-full min-h-0" />
                             </ResizablePanel>
                         </template>
                     </ResizablePanelGroup>
                 </SidebarInset>
+                <Sheet v-model:open="friendsOpen">
+                    <SheetContent side="right" class="portrait-friends-sheet p-0 gap-0">
+                        <SheetHeader class="shrink-0 border-b px-4 py-3 pr-14">
+                            <SheetTitle>{{ t('nav_tooltip.friend_list') }}</SheetTitle>
+                            <SheetDescription class="sr-only">{{ t('nav_tooltip.friend_list') }}</SheetDescription>
+                        </SheetHeader>
+                        <div ref="asideDrawerTarget" class="flex-1 min-h-0" />
+                    </SheetContent>
+                </Sheet>
+                <Teleport v-if="asideDesktopTarget" :to="isPortrait && asideDrawerTarget ? asideDrawerTarget : asideDesktopTarget">
+                    <Sidebar />
+                </Teleport>
             </SidebarProvider>
             <StatusBar />
         </div>
@@ -95,6 +109,10 @@
     import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
     import { storeToRefs } from 'pinia';
     import { useRouter } from 'vue-router';
+    import { useI18n } from 'vue-i18n';
+    import { usePortraitLayout } from '../../composables/usePortraitLayout';
+    import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet';
+    import PortraitHeader from './PortraitHeader.vue';
 
     import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '../../components/ui/resizable';
     import { SidebarInset, SidebarProvider } from '../../components/ui/sidebar';
@@ -124,6 +142,12 @@
     import SpotlightDialog from '../../components/onboarding/SpotlightDialog.vue';
 
     const router = useRouter();
+    const { t } = useI18n();
+    const { isPortrait } = usePortraitLayout();
+    const friendsOpen = ref(false);
+    const asideDesktopTarget = ref(null);
+    const asideDrawerTarget = ref(null);
+    watch(isPortrait, (portrait) => { if (!portrait) friendsOpen.value = false; });
 
     const appearanceSettingsStore = useAppearanceSettingsStore();
     const { navWidth, isNavCollapsed } = storeToRefs(appearanceSettingsStore);
@@ -131,6 +155,7 @@
     const sidebarOpen = computed(() => !isNavCollapsed.value);
 
     const handleSidebarOpenChange = (open) => {
+        if (isPortrait.value) return;
         appearanceSettingsStore.setNavCollapsed(!open);
     };
 
@@ -186,8 +211,10 @@
     } = useMainLayoutResizable();
 
     const asidePanelRef = ref(null);
+    const onLayout = (layout) => { if (!isPortrait.value) handleLayout(layout); };
 
     watch(isSideBarTabShow, async (show) => {
+        if (isPortrait.value) return;
         await nextTick();
         if (show) {
             asidePanelRef.value?.expand();

@@ -1,9 +1,12 @@
 <script setup>
     import { TabsContent, TabsIndicator, TabsList, TabsRoot, TabsTrigger } from 'reka-ui';
     import { computed, ref, toRefs, watch } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    import { NativeSelect, NativeSelectOption } from '../native-select';
 
     const props = defineProps({
         modelValue: String,
+        portraitSelect: Boolean,
         defaultValue: String,
         items: {
             type: Array,
@@ -26,6 +29,7 @@
     });
 
     const emit = defineEmits(['update:modelValue']);
+    const { isPortrait } = usePortraitLayout();
     const { modelValue, defaultValue, items, ariaLabel, variant, unmountOnHide, fill, sticky } = toRefs(props);
 
     const itemsList = computed(() => (Array.isArray(items.value) ? items.value : []));
@@ -88,7 +92,10 @@
         :class="['w-full', fill ? 'flex min-h-0 flex-col' : '']"
         :unmount-on-hide="unmountOnHide"
         @update:modelValue="onValueChange">
-        <TabsList :class="listClass" :aria-label="ariaLabel || undefined">
+        <NativeSelect v-if="portraitSelect && isPortrait" :model-value="innerValue" :aria-label="ariaLabel || itemsList.find((i) => i.value === innerValue)?.label" @update:model-value="onValueChange">
+            <NativeSelectOption v-for="it in itemsList" :key="it.value" :value="it.value" :disabled="it.disabled">{{ it.label }}</NativeSelectOption>
+        </NativeSelect>
+        <TabsList v-show="!portraitSelect || !isPortrait" data-slot="tabs-list" :class="listClass" :aria-label="ariaLabel || undefined">
             <TabsIndicator
                 class="pointer-events-none absolute left-0 bottom-0 h-0.5 w-(--reka-tabs-indicator-size) translate-x-(--reka-tabs-indicator-position) transition-[width,translate] duration-200 ease-out">
                 <div class="h-full w-full rounded-full bg-primary" />

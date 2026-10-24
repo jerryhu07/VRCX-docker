@@ -8,13 +8,14 @@
             :total-items="totalItems"
             :on-page-size-change="handlePageSizeChange">
             <template #toolbar>
-                <div class="mt-0 mx-0 mb-2" style="display: flex; align-items: center">
+                <div class="portrait-toolbar mt-0 mx-0 mb-2" style="display: flex; align-items: center">
                     <div style="flex: none; display: flex; align-items: center" class="mr-2">
                         <Popover v-model:open="popoverOpen">
                             <PopoverTrigger as-child>
-                                <Button variant="outline" size="sm" class="mx-2 h-8 gap-1.5">
+                                <Button variant="outline" size="sm" class="mx-2 h-8 gap-1.5"
+                                    :aria-label="t('view.my_avatars.filter')" :title="t('view.my_avatars.filter')">
                                     <ListFilter class="size-4" />
-                                    {{ t('view.my_avatars.filter') }}
+                                    <span class="portrait-hide">{{ t('view.my_avatars.filter') }}</span>
                                     <Badge
                                         v-if="activeFilterCount"
                                         variant="secondary"
@@ -28,7 +29,7 @@
                                     v-model="dateRange"
                                     :locale="locale"
                                     :max-value="todayDate"
-                                    :number-of-months="2"
+                                    :number-of-months="isPortrait ? 1 : 2"
                                     :week-starts-on="weekStartsOn" />
                                 <div class="flex justify-end gap-2 mt-3">
                                     <Button variant="outline" size="sm" @click="clearDateFilter">
@@ -64,7 +65,7 @@
                         size="sm"
                         :model-value="activeFilterSelection"
                         @update:model-value="handleFeedFilterChange"
-                        class="w-full justify-start"
+                        class="w-full justify-start flex-wrap"
                         style="flex: 1">
                         <ToggleGroupItem value="All">
                             {{ t('view.search.avatar.all') }}
@@ -74,7 +75,7 @@
                         </ToggleGroupItem>
                     </ToggleGroup>
                     <InputGroupField
-                        class="ml-2"
+                        class="portrait-search ml-2"
                         v-model="feedTable.search"
                         :placeholder="t('view.feed.search_placeholder')"
                         clearable
@@ -89,6 +90,8 @@
 
 <script setup>
     import { computed, ref } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
     import { ListFilter, Star } from 'lucide-vue-next';
     import { getLocalTimeZone, today } from '@internationalized/date';
     import { storeToRefs } from 'pinia';

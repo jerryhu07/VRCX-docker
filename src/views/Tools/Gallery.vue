@@ -1,5 +1,5 @@
 <template>
-    <div class="gallery-page x-container">
+    <div class="portrait-gallery gallery-page x-container">
         <div class="flex items-center gap-2 ml-2">
             <Button variant="ghost" size="sm" class="mr-3" @click="goBack">
                 <ArrowLeft />

@@ -1,10 +1,10 @@
 <template>
-    <div :class="['flex flex-col min-w-0 data-table', autoHeight && 'flex-1 min-h-0 overflow-hidden']">
-        <div v-if="$slots.toolbar" class="mb-2">
+    <div :aria-busy="loading" :class="['flex flex-col min-w-0 data-table', autoHeight && 'flex-1 min-h-0 overflow-hidden']">
+        <div v-if="$slots.toolbar" class="dt-toolbar mb-2">
             <slot name="toolbar"></slot>
         </div>
 
-        <div :class="['rounded-md border', autoHeight && 'flex-1 min-h-0 flex flex-col overflow-hidden']">
+        <div :class="['dt-frame rounded-md border', autoHeight && 'flex-1 min-h-0 flex flex-col overflow-hidden']">
             <div
                 ref="tableScrollRef"
                 :class="['max-w-full overflow-auto relative', autoHeight && 'flex-1 min-h-0']"
@@ -199,6 +199,7 @@
                                 <ContextMenu v-if="$slots['row-context-menu']">
                                     <ContextMenuTrigger as-child>
                                         <TableRow
+                                            :data-row-id="row.id"
                                             @click="handleRowClick(row)"
                                             :class="[
                                                 'group/row',
@@ -220,6 +221,7 @@
                                 </ContextMenu>
                                 <TableRow
                                     v-else
+                                    :data-row-id="row.id"
                                     @click="handleRowClick(row)"
                                     :class="[
                                         'group/row',
@@ -266,7 +268,7 @@
             <div v-if="pageSizes.length" class="dt-pagination-sizes inline-flex items-center flex-1 justify-end gap-2">
                 <span class="text-xs text-muted-foreground truncate">{{ t('table.pagination.rows_per_page') }}</span>
                 <Select v-model="pageSizeValue">
-                    <SelectTrigger size="sm">
+                    <SelectTrigger size="sm" :aria-label="t('table.pagination.rows_per_page')">
                         <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -280,21 +282,26 @@
                 v-model:page="currentPage"
                 :total="totalItems"
                 :items-per-page="pageSizeProxy"
-                :sibling-count="1"
-                show-edges
+                :sibling-count="isPortrait ? 0 : 1"
+                :show-edges="!isPortrait"
                 class="flex-none">
                 <PaginationContent v-slot="{ items }">
                     <PaginationPrevious />
-                    <template
-                        v-for="(item, index) in items"
-                        :key="item.type === 'page' ? `page-${item.value}` : `ellipsis-${index}`">
-                        <PaginationItem
-                            v-if="item.type === 'page'"
-                            :value="item.value"
-                            :is-active="item.value === currentPage">
-                            {{ item.value }}
-                        </PaginationItem>
-                        <PaginationEllipsis v-else />
+                    <span v-if="isPortrait" class="dt-page-count text-xs tabular-nums text-muted-foreground">
+                        {{ currentPage }} / {{ Math.max(1, Math.ceil(totalItems / pageSizeProxy)) }}
+                    </span>
+                    <template v-else>
+                        <template
+                            v-for="(item, index) in items"
+                            :key="item.type === 'page' ? `page-${item.value}` : `ellipsis-${index}`">
+                            <PaginationItem
+                                v-if="item.type === 'page'"
+                                :value="item.value"
+                                :is-active="item.value === currentPage">
+                                {{ item.value }}
+                            </PaginationItem>
+                            <PaginationEllipsis v-else />
+                        </template>
                     </template>
                     <PaginationNext />
                 </PaginationContent>
@@ -313,6 +320,7 @@
     import { storeToRefs } from 'pinia';
     import { useAppearanceSettingsStore } from '@/stores/';
     import { useI18n } from 'vue-i18n';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
 
     import {
         ContextMenu,
@@ -410,7 +418,20 @@
     });
 
     const { t } = useI18n();
+    const { isPortrait } = usePortraitLayout();
     const tableScrollRef = ref(null);
+    watch(isPortrait, async () => {
+        const container = tableScrollRef.value;
+        if (!container) return;
+        const top = container.getBoundingClientRect().top;
+        const anchor = [...container.querySelectorAll('[data-row-id]')].find((el) => el.getBoundingClientRect().bottom > top);
+        if (!anchor) return;
+        const id = anchor.dataset.rowId;
+        const offset = anchor.getBoundingClientRect().top - top;
+        await nextTick();
+        const next = [...container.querySelectorAll('[data-row-id]')].find((el) => el.dataset.rowId === id);
+        if (next) container.scrollTop += next.getBoundingClientRect().top - container.getBoundingClientRect().top - offset;
+    });
 
     const tableMeta = computed(() => props.table?.options?.meta ?? {});
 

@@ -1,6 +1,8 @@
 <script setup>
     import { Sheet, SheetContent } from '@/components/ui/sheet';
     import { cn } from '@/lib/utils';
+    import { useI18n } from 'vue-i18n';
+    const { t } = useI18n();
 
     import SheetDescription from '@/components/ui/sheet/SheetDescription.vue';
     import SheetHeader from '@/components/ui/sheet/SheetHeader.vue';
@@ -49,13 +51,13 @@
             data-slot="sidebar"
             data-mobile="true"
             :side="side"
-            class="bg-sidebar text-sidebar-foreground w-(--sidebar-width) p-0 [&>button]:hidden"
+            class="bg-sidebar text-sidebar-foreground w-(--sidebar-width) p-0 gap-0"
             :style="{
                 '--sidebar-width': SIDEBAR_WIDTH_MOBILE
             }">
-            <SheetHeader class="sr-only">
-                <SheetTitle>Sidebar</SheetTitle>
-                <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+            <SheetHeader class="border-b px-4 py-3 pr-14 shrink-0">
+                <SheetTitle>{{ t('common.portrait.navigation') }}</SheetTitle>
+                <SheetDescription class="sr-only">{{ t('common.portrait.navigation') }}</SheetDescription>
             </SheetHeader>
             <div class="flex h-full w-full flex-col">
                 <slot />
@@ -65,7 +67,7 @@
 
     <div
         v-else
-        class="group peer text-sidebar-foreground hidden md:block"
+        class="group peer text-sidebar-foreground block"
         data-slot="sidebar"
         :data-state="state"
         :data-collapsible="state === 'collapsed' ? collapsible : ''"
@@ -86,7 +88,7 @@
         <div
             :class="
                 cn(
-                    'absolute inset-y-0 z-10 hidden w-(--sidebar-width) md:flex',
+                    'absolute inset-y-0 z-10 flex w-(--sidebar-width)',
                     side === 'left'
                         ? 'left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]'
                         : 'right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]',

@@ -2,6 +2,7 @@
     "language": "English (en)",
     "translator": "-",
     "common": {
+        "portrait": { "navigation": "Navigation", "more": "More actions", "sort": "Sort by", "details": "Details" },
         "no_data": "No data",
         "no_matching_records": "No matching records",
         "feature_relocated": {

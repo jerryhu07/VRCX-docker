@@ -1,8 +1,8 @@
 <template>
-    <div id="chart" class="x-container">
+    <div id="chart" class="portrait-chart x-container">
         <div ref="hotWorldsRef" class="pt-4">
             <BackToTop :target="hotWorldsRef" :right="30" :bottom="30" :teleport="false" />
-            <div class="options-container mt-0 flex items-center justify-between">
+            <div class="portrait-toolbar options-container mt-0 flex items-center justify-between">
                 <div class="flex items-center gap-2 mb-4">
                     <span class="shrink-0">{{ t('view.charts.hot_worlds.header') }}</span>
                     <HoverCard>

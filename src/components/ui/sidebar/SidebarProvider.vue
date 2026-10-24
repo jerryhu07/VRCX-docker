@@ -1,5 +1,6 @@
 <script setup>
-    import { defaultDocument, useEventListener, useMediaQuery, useVModel } from '@vueuse/core';
+    import { defaultDocument, useEventListener, useVModel } from '@vueuse/core';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
     import { computed, ref } from 'vue';
     import { TooltipProvider } from 'reka-ui';
     import { cn } from '@/lib/utils';
@@ -38,7 +39,7 @@
 
     const emits = defineEmits(['update:open']);
 
-    const isMobile = useMediaQuery('(max-width: 768px)');
+    const { isPortrait: isMobile } = usePortraitLayout();
     const openMobile = ref(false);
 
     let open;

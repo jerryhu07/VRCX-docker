@@ -19,6 +19,9 @@
 
 <script setup>
     import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
+    watch(isPortrait, async () => { await nextTick(); if (echartsInstance) initEcharts(); });
     import { DataTableEmpty } from '@/components/ui/data-table';
     import { storeToRefs } from 'pinia';
 
@@ -417,13 +420,17 @@
             },
             grid: {
                 top: 50,
-                left: 160,
-                right: 90
+                left: isPortrait.value ? 100 : 160,
+                right: isPortrait.value ? 16 : 90,
+                bottom: isPortrait.value ? 64 : 60
             },
+            dataZoom: isPortrait.value ? [{ type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 20, bottom: 8 }] : [],
             yAxis: {
                 type: 'category',
                 axisLabel: {
                     interval: 0,
+                    width: isPortrait.value ? 88 : undefined,
+                    overflow: 'truncate',
                     formatter: (value) => {
                         const MAX_LENGTH = 20;
                         const len = value.length;

@@ -20,6 +20,8 @@
     import { Button } from '@/components/ui/button';
     import { TooltipWrapper } from '@/components/ui/tooltip';
     import { computed, ref } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
     import { storeToRefs } from 'pinia';
 
     import AvatarDialog from './AvatarDialog/AvatarDialog.vue';
@@ -172,7 +174,7 @@
 
 <template>
     <Dialog v-if="isOpen" v-model:open="isOpen">
-        <DialogContent :class="dialogClass" style="top: 10vh" :show-close-button="false">
+        <DialogContent :class="dialogClass" style="top: 10vh" :show-close-button="isPortrait">
             <Breadcrumb v-if="shouldShowBreadcrumbs" class="mb-2 flex-shrink-0">
                 <BreadcrumbList>
                     <TooltipWrapper :content="backCrumbLabel" :disabled="!backCrumbLabel" :delayDuration="500">

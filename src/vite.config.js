@@ -93,7 +93,7 @@ function getAssetFilename({ name }) {
 }
 
 export default defineConfig(({ mode }) => {
-    const { SENTRY_AUTH_TOKEN: sentryAuthToken } = loadEnv(
+    const { SENTRY_AUTH_TOKEN: sentryAuthToken, VRCX_HEADLESS_PROXY_URL: headlessProxyUrl } = loadEnv(
         mode,
         process.cwd(),
         ''
@@ -146,7 +146,7 @@ export default defineConfig(({ mode }) => {
                     customMedia: true
                 },
                 errorRecovery: true,
-                targets: browserslistToTargets(browserslist('Chrome 145'))
+                targets: browserslistToTargets(browserslist(['Chrome >= 110', 'Safari >= 17']))
             }
         },
         optimizeDeps: {
@@ -171,10 +171,24 @@ export default defineConfig(({ mode }) => {
         },
         server: {
             port: 9000,
-            strictPort: true
+            strictPort: false,
+            proxy: headlessProxyUrl ? {
+                '/headless': {
+                    target: headlessProxyUrl, changeOrigin: true, ws: true,
+                    configure(proxy) {
+                        proxy.on('proxyReq', (proxyReq, req) => {
+                            if (!req.headers.origin) return;
+                            try {
+                                if (new URL(req.headers.origin).host === req.headers.host) proxyReq.setHeader('origin', new URL(headlessProxyUrl).origin);
+                            } catch { /* Leave malformed origins unchanged for the backend to reject. */ }
+                        });
+                    }
+                },
+                '/healthz': { target: headlessProxyUrl, changeOrigin: true }
+            } : undefined
         },
         build: {
-            target: 'chrome145',
+            target: ['es2022', 'safari17', 'chrome110'],
             outDir: '../build/html',
             license: true,
             emptyOutDir: true,

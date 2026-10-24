@@ -2,6 +2,7 @@
     "language": "简体中文 (zh-CN)",
     "translator": "flower_elf, Yingxue, Map1en, Stabrinai, xxKawa, Anteness",
     "common": {
+        "portrait": { "navigation": "导航", "more": "更多操作", "sort": "排序", "details": "详情" },
         "no_data": "无数据",
         "no_matching_records": "无匹配记录",
         "feature_relocated": {

@@ -14,7 +14,7 @@
     import { computed, onMounted } from 'vue';
 
     const isMacOS = computed(() => {
-        return navigator.platform.indexOf('Mac') > -1;
+        return !window.__VRCX_HEADLESS__ && navigator.platform.indexOf('Mac') > -1;
     });
 
     onMounted(() => {

@@ -165,6 +165,7 @@
     import { Plus } from 'lucide-vue-next';
     import { useI18n } from 'vue-i18n';
     import { useRouter } from 'vue-router';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
 
     import { useNavLayout } from './composables/useNavLayout';
     import { useNavTheme } from './composables/useNavTheme';
@@ -233,9 +234,11 @@
         themeMode,
         tableDensity,
         isDarkMode,
-        isNavCollapsed: isCollapsed,
+        isNavCollapsed: desktopCollapsed,
         showNewDashboardButton
     } = storeToRefs(appearanceSettingsStore);
+    const { isPortrait } = usePortraitLayout();
+    const isCollapsed = computed(() => !isPortrait.value && desktopCollapsed.value);
 
     const {
         themes,
@@ -432,6 +435,7 @@
     };
 
     const toggleNavCollapse = () => {
+        if (isPortrait.value) return;
         appearanceSettingsStore.toggleNavCollapsed();
     };
 

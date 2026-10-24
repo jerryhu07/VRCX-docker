@@ -5,7 +5,7 @@
             :unmount-on-hide="false"
             aria-label="Search tabs"
             class="flex flex-col min-h-0 flex-1">
-            <div class="mt-0 mx-0 mb-2 flex items-center gap-5">
+            <div class="portrait-search-toolbar mt-0 mx-0 mb-2 flex items-center gap-5">
                 <TabsList>
                     <TabsTrigger value="user">{{ t('view.search.user.header') }}</TabsTrigger>
                     <TabsTrigger value="world">{{ t('view.search.world.header') }}</TabsTrigger>

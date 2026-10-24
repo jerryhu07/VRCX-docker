@@ -1,5 +1,24 @@
 # VRCX Docker Headless
 
+## 浏览器竖屏预览
+
+竖屏模式按视口 `height > width` 判断，正方形和横屏保留桌面布局。导航和好友栏使用抽屉，表格保留原本单行布局，超宽时在表格内横向滚动；竖屏布局不会覆盖桌面侧栏与列宽设置。Instance Activity 保持手动刷新。
+
+开发环境使用 Node.js 24.10+、npm 11.5+。以下命令只启动前端，通过代理使用已有后台，不启动第二个采集服务：
+
+```sh
+VRCX_HEADLESS_PROXY_URL=http://BACKEND_HOST:18080 npm run dev-linux -- --host 0.0.0.0 --port 9000
+```
+
+使用启动输出中的局域网地址在手机打开预览。代理地址仅是开发环境变量，不写入生产构建。手动预览连接真实后台，设置与业务操作仍会作用于该后台；自动浏览器回归会拦截写操作，并使用临时 Dashboard 和未登录页面测试数据。
+
+```sh
+npx playwright install chromium webkit
+npm run test:portrait
+```
+
+可用 `PORTRAIT_BASE_URL` 指定预览地址，或用 `PORTRAIT_CHROME_CHANNEL=chrome` 测试本机 Chrome。截图与报告保存在忽略提交的 `build/portrait-qa`、`build/portrait-report`。验收包括全部路由、宽窄竖屏、横屏、正方形、旋转、软键盘高度变化、抽屉、单行表格与局部横向滚动、搜索工具栏、设置分类、日历及弹窗；自动测试不能替代 iOS/Android 真机键盘和系统手势检查。
+
 这是一个面向 Docker 部署的 VRCX headless fork。后端长期运行在 Docker 容器内，浏览器只作为 UI 访问；即使浏览器页面关闭，后端也会继续保持登录状态、监听 VRChat 服务器事件、接收本地 VRChat 日志流并维护数据库。
 
 本仓库不是官方 VRCX 发布版。上游桌面版项目见 [vrcx-team/VRCX](https://github.com/vrcx-team/VRCX)。

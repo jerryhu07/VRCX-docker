@@ -15,7 +15,7 @@
         <ResizablePanelGroup
             v-else-if="row.panels.length === 2"
             :direction="isVertical ? 'vertical' : 'horizontal'"
-            :auto-save-id="`dashboard-${dashboardId}-row-${rowIndex}`"
+            :auto-save-id="isPortrait ? undefined : `dashboard-${dashboardId}-row-${rowIndex}`"
             class="h-full min-h-[180px]">
             <ResizablePanel :default-size="50" :min-size="20">
                 <DashboardPanel
@@ -43,6 +43,8 @@
 
 <script setup>
     import { computed } from 'vue';
+    import { usePortraitLayout } from '@/composables/usePortraitLayout';
+    const { isPortrait } = usePortraitLayout();
 
     import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 

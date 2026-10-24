@@ -156,7 +156,7 @@
             <SidebarMenuItem>
                 <SidebarMenuButton
                     :tooltip="isCollapsed ? t('nav_tooltip.expand_menu') : t('nav_tooltip.collapse_menu')"
-                    @click="emit('toggle-nav-collapse')">
+                    class="portrait-hide" @click="emit('toggle-nav-collapse')">
                     <i class="ri-side-bar-line inline-flex size-6 items-center justify-center text-[19px]" />
                     <span v-show="!isCollapsed">{{ t('nav_tooltip.collapse_menu') }}</span>
                 </SidebarMenuButton>

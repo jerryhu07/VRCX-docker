@@ -1,10 +1,10 @@
 <template>
-    <div id="chart" class="x-container">
+    <div id="chart" class="portrait-chart x-container">
         <div
             class="mt-0 flex min-h-[calc(100vh-140px)] flex-col items-center justify-betweenpt-12"
             ref="mutualGraphRef">
-            <div class="flex items-center w-full">
-                <div class="options-container flex items-center gap-3 bg-transparent pb-3 shadow-none">
+            <div class="portrait-toolbar flex items-center w-full">
+                <div class="portrait-toolbar options-container flex items-center gap-3 bg-transparent pb-3 shadow-none">
                     <div>
                         <TooltipWrapper
                             v-if="isFetching"
