@@ -337,12 +337,11 @@ export function showGroupDialog(groupId, options = {}) {
         })
         .then((args) => {
             const ref = args.ref || applyGroup(args.json);
-            if (groupId === ref.id) {
+            if (groupId === ref.id && D.id === groupId) {
                 D.ref = ref;
                 uiStore.setDialogCrumbLabel('group', D.id, D.ref?.name || D.id);
                 D.inGroup = ref.membershipStatus === 'member';
                 D.ownerDisplayName = ref.ownerId;
-                D.visible = true;
                 D.loading = false;
                 queryRequest
                     .fetch('user.dialog', {

@@ -132,6 +132,7 @@ export function showAvatarDialog(avatarId, options = {}) {
         : queryRequest.fetch('avatar.dialog', { avatarId });
     loadAvatarRequest
         .then((args) => {
+            if (D.id !== avatarId) return;
             const ref = applyAvatar(args.json);
             D.ref = ref;
             uiStore.setDialogCrumbLabel('avatar', D.id, D.ref?.name || D.id);

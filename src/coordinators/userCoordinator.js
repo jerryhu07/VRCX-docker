@@ -529,8 +529,7 @@ export function showUserDialog(userId) {
                     .then((args1) => {
                         handleGroupRepresented(args1);
                     });
-                D.visible = true;
-                userStore.applyUserDialogLocation(true);
+                if (D.visible) userStore.applyUserDialogLocation(true);
             }
         });
     showUserDialogHistory.delete(userId);

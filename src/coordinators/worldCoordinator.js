@@ -140,7 +140,6 @@ export function showWorldDialog(tag, shortName = null, options = {}) {
                         }
                     }
                 }
-                D.visible = true;
                 D.loading = false;
                 D.isFavorite = favoriteStore.getCachedFavoritesByObjectId(D.id);
                 if (!D.isFavorite) {
