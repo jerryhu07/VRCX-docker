@@ -5,6 +5,7 @@ services:
     image: vrcx-headless:local
     container_name: vrcx-headless
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       PORT: "8080"
       VRCX_APP_DATA_DIR: /data

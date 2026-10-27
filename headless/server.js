@@ -12,6 +12,7 @@ const { installerConfigTrailer } = require('./installerConfig.cjs');
 const { validateLogClientSettings } = require('./logClientSettings.cjs');
 const { buildInstanceActivity } = require('./instanceActivity.cjs');
 const { RoomData } = require('./roomData.cjs');
+const { SqliteCoordinator, browserTransactionOnly } = require('./sqliteCoordinator.cjs');
 const { WebSocketServer } = WebSocketClient;
 
 const rootDir = path.resolve(__dirname, '..');
@@ -726,8 +727,9 @@ class HeadlessSession {
         this.cookieJar = new CookieJar(this);
         this.logStreamToken = process.env.VRCX_LOG_STREAM_TOKEN || '';
         this.logStreamAuthGeneration = 0;
+        this.sqliteCoordinator = new SqliteCoordinator((sql) => this.sqliteNonQuery(sql));
         this.roomData = new RoomData({
-            getRoster: () => this.loggedIn ? this.playerListSnapshot() : null,
+            getRoster: () => this.loggedIn && !this.stopping ? this.playerListSnapshot() : null,
             getFriends: () => this.friends,
             fetchProfile: (id) => this.vrchatRequest(`users/${id}`),
             fetchMutuals: (id) => this.fetchWatchMutualFriends(id),
@@ -820,7 +822,16 @@ class HeadlessSession {
             if (!Array.isArray(args[0]) || args[0].length > 10000) throw new Error('Invalid user colour list');
             return Object.fromEntries(args[0].map((id) => [id, colour(id)]));
         }
+        if (className === 'SQLite') return await this.sqliteCoordinator.run(() => this.bridge.call(className, methodName, args));
         return await this.bridge.call(className, methodName, args);
+    }
+
+    async browserSqliteCall(method, args = []) {
+        if (!['Execute', 'ExecuteJson', 'ExecuteNonQuery'].includes(method)) {
+            throw Object.assign(new Error('SQLite lifecycle is owned by the backend'), { status: 403 });
+        }
+        if (browserTransactionOnly(args[0])) return method === 'ExecuteJson' ? '[]' : method === 'Execute' ? [] : 0;
+        return await this.call('SQLite', method, args);
     }
 
     async sqliteExecute(sql, args = null) {
@@ -2380,8 +2391,7 @@ class HeadlessSession {
 
     async replaceCurrentMutualNetwork(snapshot, fetchedAt) {
         const prefix = userPrefix(this.requireWatchListOwner());
-        await this.sqliteNonQuery('BEGIN');
-        try {
+        return await this.sqliteCoordinator.transaction(async () => {
             await this.sqliteNonQuery(
                 `DELETE FROM ${prefix}_mutual_graph_links`
             );
@@ -2410,11 +2420,7 @@ class HeadlessSession {
                     );
                 }
             }
-            await this.sqliteNonQuery('COMMIT');
-        } catch (err) {
-            await this.sqliteNonQuery('ROLLBACK');
-            throw err;
-        }
+        });
     }
 
     async fetchMutualNetwork({ source = 'scheduled' } = {}) {
@@ -2483,8 +2489,7 @@ class HeadlessSession {
 
     async migrateWatchMutualHistory() {
         if (await this.configGet('watchMutualUidOnlyV1', '')) return;
-        await this.sqliteNonQuery('BEGIN');
-        try {
+        return await this.sqliteCoordinator.transaction(async () => {
             const rows = await this.sqliteExecute(
                 "SELECT id, owner_id, user_id, snapshot_json FROM headless_watch_changes WHERE source = 'mutuals' ORDER BY id"
             );
@@ -2516,11 +2521,7 @@ class HeadlessSession {
                 );
             }
             await this.configSet('watchMutualUidOnlyV1', 'true');
-            await this.sqliteNonQuery('COMMIT');
-        } catch (err) {
-            await this.sqliteNonQuery('ROLLBACK');
-            throw err;
-        }
+        });
     }
 
     async listWatchUsers() {
@@ -4466,6 +4467,7 @@ class HeadlessSession {
 
         socket.on('message', async (data) => {
             try {
+                if (this.stopping) { socket.close(1001, 'Backend restarting'); return; }
                 if (generation !== this.logStreamAuthGeneration) { socket.close(1008, 'Log stream token rotated'); return; }
                 const message = JSON.parse(data.toString('utf8'));
                 if (message.machineId && String(message.machineId) !== machineId) throw new Error('Client ID cannot change within a connection');
@@ -4509,11 +4511,13 @@ class HeadlessSession {
                     return;
                 }
             } catch (err) {
+                if (this.stopping) return;
                 const client = this.getLogStreamClient(machineId);
                 client.failedCount++;
                 client.lastError = err.message || String(err);
-                await this.persistLogStreamClient(client);
-                socket.send(
+                try { await this.persistLogStreamClient(client); }
+                catch (error) { console.warn('Failed to persist log stream error:', error.message); }
+                if (socket.readyState === WebSocketClient.OPEN) socket.send(
                     JSON.stringify({
                         type: 'error',
                         error: client.lastError
@@ -4524,7 +4528,9 @@ class HeadlessSession {
 
         socket.on('close', async () => {
             connectionClient.sockets.delete(socket);
-            await this.updateLogStreamClient(machineId, { connected: connectionClient.sockets.size > 0 });
+            if (this.stopping) return;
+            try { await this.updateLogStreamClient(machineId, { connected: connectionClient.sockets.size > 0 }); }
+            catch (error) { console.warn('Failed to persist log client disconnect:', error.message); }
         });
     }
 
@@ -5596,7 +5602,7 @@ async function handleHeadlessRoute(req, res, url) {
             jsonResponse(
                 res,
                 200,
-                await session.sqliteExecute(body.sql, body.args || null)
+                JSON.parse(await session.browserSqliteCall('ExecuteJson', [body.sql, toDotNetMap(normalizeSqlArgs(body.sql, body.args || null))]) || '[]')
             );
             return true;
         }
@@ -5604,15 +5610,8 @@ async function handleHeadlessRoute(req, res, url) {
             req.method === 'POST' &&
             url.pathname === '/headless/sqlite/executeNonQuery'
         ) {
-            // Legacy browser cache writers span BEGIN/COMMIT across HTTP calls.
-            // Never let a closed tab hold the collector's connection in a transaction.
-            // Browser cache writes use autocommit; backend-owned transactions remain atomic.
-            if (/^\s*(?:BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(body.sql || '')) {
-                jsonResponse(res, 200, { value: 0 });
-                return true;
-            }
             jsonResponse(res, 200, {
-                value: await session.sqliteNonQuery(body.sql, body.args || null)
+                value: await session.browserSqliteCall('ExecuteNonQuery', [body.sql, toDotNetMap(normalizeSqlArgs(body.sql, body.args || null))])
             });
             return true;
         }
@@ -5652,7 +5651,7 @@ async function handleHeadlessRoute(req, res, url) {
         );
         if (req.method === 'POST' && dotnetMatch) {
             jsonResponse(res, 200, {
-                value: await session.call(
+                value: dotnetMatch[1] === 'SQLite' ? await session.browserSqliteCall(dotnetMatch[2], body.args || []) : await session.call(
                     dotnetMatch[1],
                     dotnetMatch[2],
                     body.args || []
@@ -5734,6 +5733,7 @@ async function bootstrap() {
     await session.init({ restoreSession: false });
 
     const server = http.createServer(async (req, res) => {
+        if (session.stopping) { jsonResponse(res, 503, { error: { message: 'Backend restarting' } }); return; }
         const url = new URL(
             req.url,
             `http://${req.headers.host || 'localhost'}`
@@ -5748,6 +5748,7 @@ async function bootstrap() {
     });
     const logStreamServer = new WebSocketServer({ noServer: true });
     server.on('upgrade', (req, socket, head) => {
+        if (session.stopping) { socket.destroy(); return; }
         const url = new URL(
             req.url,
             `http://${req.headers.host || 'localhost'}`
@@ -5781,15 +5782,27 @@ async function bootstrap() {
     session.startPipelineRecoveryLoop();
 
     const shutdown = async () => {
+        if (session.stopping) return;
+        session.stopping = true;
+        server.close();
         try {
             session.stopAuthRecoveryLoop();
             session.stopPipelineRecoveryLoop();
+            session.stopFriendRefreshLoop();
+            session.stopWatchListLoop();
+            session.stopMutualNetworkLoop();
             clearInterval(session.profileRefreshTimer);
             session.closePipeline();
+            for (const socket of logStreamServer.clients) socket.close(1001, 'Backend restarting');
+            for (const client of session.clients) client.res.end();
+            await Promise.allSettled([...session.logStreamClients.values()].map((client) => client.ingestQueue));
+            await session.sqliteCoordinator.close();
             await bridge.getObject('VRCXStorage').Save();
             await bridge.getObject('SQLite').Exit();
-        } finally {
             process.exit(0);
+        } catch (error) {
+            console.error('Graceful shutdown failed:', error);
+            process.exit(1);
         }
     };
     process.on('SIGTERM', shutdown);
