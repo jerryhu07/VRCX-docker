@@ -85,6 +85,7 @@ function isFont(name) {
  * @param {import('rolldown').PreRenderedAsset} assetInfo
  */
 function getAssetFilename({ name }) {
+    if (/\.css$/i.test(name || '')) return 'assets/[name]-[hash][extname]';
     const language = getAssetLanguage(name);
     if (!language) return `assets/${defaultAssetName}`;
 
