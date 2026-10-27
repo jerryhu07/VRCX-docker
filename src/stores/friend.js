@@ -81,8 +81,16 @@ export const useFriendStore = defineStore('Friend', () => {
     function applyHeadlessFriendState(payload) {
         if (payload.ownerId !== userStore.currentUser.id) return;
         if (!payload.user?.id || !acceptHeadlessFriendVersion(payload.generation, payload.revision)) return;
-        if (!friends.has(payload.user.id)) addFriend(payload.user.id, payload.user.state);
-        applyUser(payload.user);
+        applyHeadlessFriendUser(payload.user);
+    }
+
+    function applyHeadlessFriendUser(user) {
+        if (!friends.has(user.id)) addFriend(user.id, user.state);
+        applyUser(user);
+        // Apply authoritative presence after profile normalization, for every state.
+        runUpdateFriendFlow(user.id, user.state).catch((error) => {
+            console.error('Headless friend presence update failed:', error);
+        });
     }
 
     const derivedDebugCounters = reactive({
@@ -658,7 +666,7 @@ export const useFriendStore = defineStore('Friend', () => {
                             onlineFriends: snapshot.users.filter((user) => user.state === 'online').map((user) => user.id),
                             activeFriends: snapshot.users.filter((user) => user.state === 'active').map((user) => user.id),
                             offlineFriends: snapshot.users.filter((user) => user.state === 'offline').map((user) => user.id) });
-                        for (const user of snapshot.users) applyUser(user);
+                        for (const user of snapshot.users) applyHeadlessFriendUser(user);
                     });
                 }
                 isRefreshFriendsLoading.value = false;
