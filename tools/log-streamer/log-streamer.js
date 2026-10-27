@@ -17,34 +17,39 @@ const DEFAULT_TAIL_BYTES = 1024 * 1024;
 const DEFAULT_HISTORY_MAX_DAYS = 14;
 const DEFAULT_HISTORY_MAX_FILES = 20;
 const DEFAULT_VRCHAT_STEAM_APP_ID = '438100';
-const CLIENT_VERSION = '2026.10.06';
+const CLIENT_VERSION = '2026.10.14';
 
 function readWindowsClientStatus() {
     if (process.platform !== 'win32') return Promise.resolve({ debugLoggingEnabled: null, userProfile: '' });
     const script = `
         [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $ErrorActionPreference = 'Stop'
-        $enabled = $null; $userProfilePath = ''; $errorText = ''
+        $enabled = $null; $userProfilePath = ''; $errorText = ''; $key = $null
         try {
             $p = Get-CimInstance Win32_Process -Filter "Name='VRChat.exe'" | Select-Object -First 1
-            $root = 'Registry::HKEY_CURRENT_USER\\Software\\VRChat\\VRChat'
+            $hive = [Microsoft.Win32.Registry]::CurrentUser
+            $subKey = 'Software\\VRChat\\VRChat'
             if ($p) {
                 $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid
                 if ($owner.ReturnValue -eq 0) {
-                    $root = 'Registry::HKEY_USERS\\' + $owner.Sid + '\\Software\\VRChat\\VRChat'
+                    $hive = [Microsoft.Win32.Registry]::Users
+                    $subKey = $owner.Sid + '\\Software\\VRChat\\VRChat'
                     $userProfilePath = (Get-CimInstance Win32_UserProfile -Filter ("SID='" + $owner.Sid + "'")).LocalPath
                 }
             }
-            if (Test-Path -LiteralPath $root) {
-                $entry = (Get-ItemProperty -LiteralPath $root).PSObject.Properties | Where-Object { $_.Name -match '^LOGGING_ENABLED(_h[0-9]+)?$' } | Select-Object -First 1
-                if ($entry) {
-                    $value = $entry.Value
+            $key = $hive.OpenSubKey($subKey)
+            if ($key) {
+                # Reading all values through the registry provider can fail on unrelated Unity preferences.
+                $name = $key.GetValueNames() | Where-Object { $_ -match '^LOGGING_ENABLED(_h[0-9]+)?$' } | Select-Object -First 1
+                if ($name) {
+                    $value = $key.GetValue($name)
                     if ($value -is [byte[]]) { $value = [Text.Encoding]::UTF8.GetString($value).Trim([char]0) }
                     if ([string]$value -eq '1') { $enabled = $true }
                     elseif ([string]$value -eq '0') { $enabled = $false }
                 }
             }
         } catch { $errorText = $_.Exception.Message }
+        finally { if ($key) { $key.Dispose() } }
         @{ debugLoggingEnabled=$enabled; userProfile=$userProfilePath; statusError=$errorText } | ConvertTo-Json -Compress
     `;
     return new Promise((resolve) => {
@@ -1058,7 +1063,7 @@ async function main() {
     await streamer.start();
 }
 
-module.exports = { Streamer, readLines, parseArgs, expandConfigPath };
+module.exports = { Streamer, readLines, parseArgs, expandConfigPath, readWindowsClientStatus };
 
 if (require.main === module || require('node:sea').isSea()) {
     main().catch((err) => {

@@ -3,9 +3,26 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { Streamer, readLines, parseArgs, expandConfigPath } = require('./log-streamer');
+const { Streamer, readLines, parseArgs, expandConfigPath, readWindowsClientStatus } = require('./log-streamer');
 const { WebSocketServer } = require('ws');
 const { once } = require('node:events');
+
+test('logging status reads only the matching registry value and disposes its key', async (t) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    t.after(() => Object.defineProperty(process, 'platform', platform));
+    t.mock.method(require('node:child_process'), 'execFile', (file, args, options, callback) => {
+        assert.equal(file, 'powershell.exe');
+        const script = args.at(-1);
+        assert.doesNotMatch(script, /Get-ItemProperty/);
+        assert.match(script, /\$hive\.OpenSubKey\(\$subKey\)/);
+        assert.match(script, /\$key\.GetValueNames\(\)/);
+        assert.match(script, /\$key\.GetValue\(\$name\)/);
+        assert.match(script, /finally.*\$key\.Dispose\(\)/);
+        callback(null, JSON.stringify({ debugLoggingEnabled: true, statusError: '' }));
+    });
+    assert.deepEqual(await readWindowsClientStatus(), { debugLoggingEnabled: true, statusError: '' });
+});
 
 test('downloaded config paths resolve beside the config and heartbeat reports unknown logging honestly', () => {
     assert.equal(expandConfigPath('%CONFIG_DIR%/streamer-state.json', '/client/config.json'), '/client/streamer-state.json');
