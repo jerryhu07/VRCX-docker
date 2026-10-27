@@ -360,3 +360,112 @@ test('player list renders backend snapshot and processes live joins/leaves witho
     await send({ ...state, playerList: { ...snapshot, players: [] } });
     await expect(rows).toHaveCount(0);
 });
+
+test('room profiles arrive automatically and the network includes friends outside the room', async ({ page }, testInfo) => {
+    const visitor = 'usr_00000000-0000-4000-8000-000000000003';
+    const outside = 'usr_00000000-0000-4000-8000-000000000004';
+    const worldId = 'wrld_00000000-0000-4000-8000-000000000010';
+    const room = { ownerId: bootstrap.currentUser.id, machineId: 'fixture', location: `${worldId}:fixture`, name: 'Fixture room', date: Date.now() - 60000,
+        players: [{ userId: visitor, displayName: 'Log-only Visitor', joinTime: Date.now() - 60000 }] };
+    await page.route('**/headless/webapi/execute', (route) => {
+        const body = route.request().postDataJSON();
+        if (!(body.options || body).url?.includes(`worlds/${worldId}`)) return route.fallback();
+        return route.fulfill({ json: { status: 200, data: JSON.stringify({ id: worldId, name: room.name,
+            tags: [], unityPackages: [], authorId: bootstrap.currentUser.id, authorName: 'Fixture author', description: '' }) } });
+    });
+    await page.addInitScript(() => {
+        window.EventSource = class { constructor() { window.__roomEvents = this; } close() {} };
+    });
+    await open(page, 'player-list', { width: 390, height: 844 });
+    await expect.poll(() => page.evaluate(() => !!window.__roomEvents?.onmessage)).toBe(true);
+    const send = (payload) => page.evaluate((payload) => window.__roomEvents.onmessage({ data: JSON.stringify(payload) }), payload);
+    await send({ type: 'room-data', playerList: room });
+    const rows = page.locator('.main-page-panel tbody tr[data-row-id]');
+    await expect(rows.filter({ hasText: 'Log-only Visitor' })).toHaveCount(1);
+    room.players[0].profileVersion = 1;
+    room.players[0].profile = { id: visitor, displayName: 'Fetched Room Visitor', tags: ['system_trust_known'],
+        userIcon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' };
+    await send({ type: 'room-data', playerList: room });
+    await expect(rows.filter({ hasText: 'Fetched Room Visitor' })).toHaveCount(1);
+    await expect(rows.locator('img')).toHaveCount(1);
+    const network = { key: 'fixture', ownerId: room.ownerId, location: room.location, date: room.date,
+        nodes: [{ id: visitor, label: 'Fetched Room Visitor', inRoom: true, isFriend: false },
+            { id: outside, label: 'Outside Friend', inRoom: false, isFriend: true }],
+        edges: [{ source: visitor, target: outside }], total: 1, fetched: 1, failed: 0, refreshing: false };
+    let fetches = 0;
+    await page.route('**/headless/room-network/refresh', (route) => {
+        expect(route.request().postDataJSON()).toEqual({ force: true });
+        fetches++; return route.fulfill({ json: network });
+    });
+    await send({ type: 'room-data', playerList: room, roomNetwork: network });
+    await page.getByRole('button', { name: 'Known connections', exact: true }).click();
+    const chart = page.locator('.room-mutual-network [role="img"]');
+    await expect(chart.locator('canvas').first()).toBeVisible();
+    expect(fetches).toBe(0);
+    await page.getByRole('button', { name: 'List', exact: true }).click();
+    await page.getByRole('button', { name: 'Known connections', exact: true }).click();
+    await expect(chart.locator('canvas').first()).toBeVisible();
+    expect(fetches).toBe(0);
+    await page.locator('.room-mutual-network').getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect.poll(() => fetches).toBe(1);
+    await expect(page.locator('.room-mutual-network select option', { hasText: 'Outside Friend' })).toHaveCount(1);
+    for (const size of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) {
+        await page.setViewportSize(size);
+        await expect.poll(async () => {
+            const png = await chart.screenshot();
+            return page.evaluate(async (base64) => {
+                const image = new Image(); image.src = `data:image/png;base64,${base64}`; await image.decode();
+                const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+                const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+                const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                let colored = 0;
+                for (let i = 0; i < pixels.length; i += 4) if (Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) - Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) > 60) colored++;
+                return colored;
+            }, png.toString('base64'));
+        }).toBeGreaterThan(50);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+        await page.screenshot({ path: `build/portrait-qa/${testInfo.project.name}/room-network-${size.width}.png` });
+    }
+    await page.locator('.room-mutual-network select').selectOption(outside);
+    await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+    await page.locator('.room-mutual-network select').selectOption('');
+    const blueCenter = async () => {
+        const png = await chart.screenshot();
+        return page.evaluate(async (base64) => {
+            const image = new Image(); image.src = `data:image/png;base64,${base64}`; await image.decode();
+            const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+            const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+            const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            let x = 0, y = 0, count = 0, orange = 0;
+            for (let i = 0; i < pixels.length; i += 4) {
+                if (Math.abs(pixels[i] - 251) + Math.abs(pixels[i + 1] - 191) + Math.abs(pixels[i + 2] - 36) < 20) orange++;
+                if (Math.abs(pixels[i] - 56) + Math.abs(pixels[i + 1] - 189) + Math.abs(pixels[i + 2] - 248) > 20) continue;
+                x += (i / 4) % canvas.width; y += Math.floor(i / 4 / canvas.width); count++;
+            }
+            return count ? { x: x / count, y: y / count, orange } : null;
+        }, png.toString('base64'));
+    };
+    // Let the explicit camera animation finish before comparing data refreshes.
+    await page.getByRole('button', { name: 'Reset view', exact: true }).click();
+    let lastCenter;
+    await expect.poll(async () => {
+        const next = await blueCenter();
+        const stable = next && lastCenter && Math.hypot(next.x - lastCenter.x, next.y - lastCenter.y) < 0.5;
+        lastCenter = next;
+        return Boolean(stable);
+    }).toBe(true);
+    const before = lastCenter;
+    const newFriend = 'usr_00000000-0000-4000-8000-000000000005';
+    const updated = { ...network, nodes: [...network.nodes, { id: newFriend, label: 'New related friend', inRoom: false, isFriend: true }],
+        edges: [...network.edges, { source: visitor, target: newFriend }] };
+    await send({ type: 'room-data', playerList: room, roomNetwork: { ...updated, refreshing: true } });
+    await expect(page.locator('.room-mutual-network select option', { hasText: 'New related friend' })).toHaveCount(1);
+    await send({ type: 'room-data', playerList: room, roomNetwork: { ...updated, refreshing: false } });
+    await expect.poll(async () => (await blueCenter())?.orange || 0).toBeGreaterThan(before.orange * 1.4);
+    await expect.poll(async () => {
+        const after = await blueCenter();
+        return after ? Math.hypot(after.x - before.x, after.y - before.y) : Infinity;
+    }).toBeLessThan(1);
+    await send({ type: 'room-data', playerList: null, roomNetwork: null });
+    await expect(page.locator('.room-mutual-network select option')).toHaveCount(1);
+});

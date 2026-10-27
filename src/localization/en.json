@@ -357,6 +357,19 @@
             }
         },
         "player_list": {
+            "list": "List",
+            "network": "Known connections",
+            "select_player": "Select a player",
+            "zoom_in": "Zoom in",
+            "zoom_out": "Zoom out",
+            "reset_view": "Reset view",
+            "room_player": "Room player",
+            "room_friend": "Friend in room",
+            "other_friend": "Friend outside room",
+            "network_progress": "{fetched}/{total} players fetched · {edges} connections",
+            "network_failed": "{count} fetches failed",
+            "layout_failed": "Graph layout failed",
+            "network_help": "Room players are always shown. Friends outside the room appear only when connected to a non-friend in the room; links from room friends to outside friends are hidden. Only API-visible mutual friends are shown; no edge does not prove no friendship. Your own friend connections and hidden-user placeholders are omitted. Profiles and mutual friends are fetched together in the background and cached for 12 hours, unless manually refreshed.",
             "photon": {
                 "current": "Current",
                 "previous": "Previous",

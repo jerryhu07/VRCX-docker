@@ -46,6 +46,7 @@ import { useUserStore } from './user';
 import { useWorldStore } from './world';
 import { watchState } from '../services/watchState';
 import { logStreamState } from '../services/logStreamClient';
+import { applyUser } from '../coordinators/userCoordinator';
 
 import configRepository from '../services/config';
 
@@ -1364,7 +1365,7 @@ export const useInstanceStore = defineStore('Instance', () => {
             users.push({
                 ref,
                 displayName: ref.displayName,
-                timer: ref.$location_at,
+                timer: locationStore.lastLocation.playerList.get(ref.id)?.joinTime ?? ref.$location_at,
                 $trustSortNum: ref.$trustSortNum ?? 0,
                 photonId,
                 isMaster,
@@ -1418,12 +1419,21 @@ export const useInstanceStore = defineStore('Instance', () => {
         currentInstanceUsersData.value = users;
     }
 
+    const headlessProfileVersions = new Map();
     watch([() => logStreamState.playerList, () => watchState.isFriendsLoaded, () => userStore.currentUser?.id],
         ([snapshot]) => {
             if (!window.__VRCX_HEADLESS__ || snapshot === undefined) return;
             if (snapshot?.ownerId && snapshot.ownerId !== userStore.currentUser?.id) return;
             const previousLocation = locationStore.lastLocation.location;
             locationStore.applyHeadlessPlayerList(snapshot, friendStore.friends);
+            for (const player of snapshot?.players || []) {
+                const key = `${snapshot.ownerId}:${player.userId}`;
+                if (player.profile?.id !== player.userId || !player.profileVersion) continue;
+                if (headlessProfileVersions.get(key) === player.profileVersion && userStore.cachedUsers.has(player.userId)) continue;
+                applyUser({ ...player.profile, isFriend: friendStore.friends.has(player.userId) });
+                headlessProfileVersions.set(key, player.profileVersion);
+            }
+            while (headlessProfileVersions.size > 1024) headlessProfileVersions.delete(headlessProfileVersions.keys().next().value);
             if (previousLocation !== locationStore.lastLocation.location) updateCurrentInstanceWorld();
             getCurrentInstanceUserList();
         }, { immediate: true });

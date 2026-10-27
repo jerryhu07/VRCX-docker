@@ -314,3 +314,22 @@ html[data-layout='portrait'] [data-slot='dialog-content'] img { max-width: 100%;
 html[data-layout='portrait'] .friend-view__toolbar { flex-wrap: wrap; gap: 8px; }
 html[data-layout='portrait'] .friend-view__search { width: 100%; min-width: 0; }
 html[data-layout='portrait'] .portrait-tools [class*='group-hover:opacity-100'] { opacity: 1; }
+html[data-layout='portrait'] .player-list-header {
+    display: grid !important;
+    grid-template-columns: 80px minmax(0, 1fr);
+    min-height: 0 !important;
+    margin-bottom: 6px;
+}
+html[data-layout='portrait'] .player-list-header > :first-child {
+    width: 80px !important;
+    height: 60px !important;
+    object-fit: cover;
+}
+html[data-layout='portrait'] .player-list-world-info { min-width: 0 !important; width: auto !important; }
+html[data-layout='portrait'] .player-list-world-meta {
+    grid-column: 1 / -1;
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    margin-left: 0;
+    gap: 4px;
+}

@@ -11,6 +11,7 @@ const schemas = require('./schema.json');
 const { installerConfigTrailer } = require('./installerConfig.cjs');
 const { validateLogClientSettings } = require('./logClientSettings.cjs');
 const { buildInstanceActivity } = require('./instanceActivity.cjs');
+const { RoomData } = require('./roomData.cjs');
 const { WebSocketServer } = WebSocketClient;
 
 const rootDir = path.resolve(__dirname, '..');
@@ -725,6 +726,13 @@ class HeadlessSession {
         this.cookieJar = new CookieJar(this);
         this.logStreamToken = process.env.VRCX_LOG_STREAM_TOKEN || '';
         this.logStreamAuthGeneration = 0;
+        this.roomData = new RoomData({
+            getRoster: () => this.loggedIn ? this.playerListSnapshot() : null,
+            getFriends: () => this.friends,
+            fetchProfile: (id) => this.vrchatRequest(`users/${id}`),
+            fetchMutuals: (id) => this.fetchWatchMutualFriends(id),
+            notify: (data) => this.broadcast({ type: 'room-data', ...data })
+        });
     }
 
     async init({ restoreSession = true } = {}) {
@@ -773,7 +781,8 @@ class HeadlessSession {
             websocketDomain: this.websocketDomain,
             browserClients: this.clients.size,
             friendCacheSize: this.friends.size,
-            playerList: this.playerListSnapshot(),
+            playerList: this.roomData.decorate(this.playerListSnapshot()),
+            roomNetwork: this.roomData.network(),
             logStream: {
                 tokenConfigured: !!this.logStreamToken,
                 clients: Array.from(this.logStreamClients.values()).map(
@@ -1865,6 +1874,7 @@ class HeadlessSession {
     async initializeAuthenticatedData(userId) {
         await this.loadFriendSnapshot();
         if (!this.loggedIn || this.currentUser?.id !== userId) return;
+        this.roomData.sync();
         this.startWatchListLoop();
         clearInterval(this.profileRefreshTimer);
         this.profileRefreshTimer = setInterval(() => this.refreshStaleProfiles().catch((err) => {
@@ -4480,6 +4490,7 @@ class HeadlessSession {
                     );
                     this.broadcast({ type: 'state', state: this.state() });
                     if (previousRunning !== client.vrchatRunning) this.broadcast({ type: 'game-log-refresh' });
+                    this.roomData.sync();
                     return;
                 }
 
@@ -4632,6 +4643,7 @@ class HeadlessSession {
         client.players = new Map(client.liveInstance.players);
         await this.persistLogStreamClient(client);
         this.broadcast({ type: 'state', state: this.state() });
+        this.roomData.sync();
         if (changed) {
             this.broadcast({ type: 'game-log-refresh' });
         }
@@ -5390,6 +5402,16 @@ async function handleHeadlessRoute(req, res, url) {
             return true;
         }
 
+        if (url.pathname === '/headless/room-network' && req.method === 'GET') {
+            session.requireWatchListOwner();
+            jsonResponse(res, 200, session.roomData.network());
+            return true;
+        }
+        if (url.pathname === '/headless/room-network/refresh' && req.method === 'POST') {
+            session.requireWatchListOwner();
+            jsonResponse(res, 202, session.roomData.requestNetwork(body.force === true));
+            return true;
+        }
         if (
             req.method === 'GET' &&
             url.pathname === '/headless/mutual-network/snapshots'

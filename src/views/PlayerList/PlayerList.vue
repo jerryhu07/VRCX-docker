@@ -1,11 +1,11 @@
 <template>
-    <div class="x-container x-container--auto-height" ref="playerListRef">
+    <div class="player-list x-container x-container--auto-height" ref="playerListRef">
         <div class="flex h-full min-h-0 flex-col overflow-y-auto overflow-x-hidden">
             <div
                 v-if="currentInstanceWorld.ref.id"
                 ref="playerListHeaderRef"
                 style="display: flex; min-height: 120px"
-                class="mb-7">
+                class="player-list-header mb-7">
                 <img
                     v-if="!worldImageError"
                     :src="currentInstanceWorld.ref.thumbnailImageUrl"
@@ -20,7 +20,7 @@
                     style="flex: none; width: 160px; height: 120px; border-radius: var(--radius-md)">
                     <Image class="size-8 text-muted-foreground" />
                 </div>
-                <div class="ml-2" style="display: flex; flex-direction: column; min-width: 320px; width: 100%">
+                <div class="player-list-world-info ml-2" style="display: flex; flex-direction: column; min-width: 320px; width: 100%">
                     <div class="flex items-center">
                         <span
                             class="cursor-pointer"
@@ -121,7 +121,7 @@
                             v-text="currentInstanceWorld.ref.description"></span>
                     </div>
                 </div>
-                <div class="ml-5" style="display: flex; flex-direction: column">
+                <div class="player-list-world-meta ml-5" style="display: flex; flex-direction: column">
                     <div class="box-border flex items-center p-1.5 text-[13px] cursor-default">
                         <div class="flex-1 overflow-hidden">
                             <span class="block truncate font-medium leading-[18px]">{{
@@ -164,7 +164,14 @@
                 <PhotonEventTable @show-chatbox-blacklist="showChatboxBlacklistDialog" />
             </div>
 
-            <div class="current-instance-table flex min-h-0 min-w-0 flex-1">
+            <ToggleGroup v-if="headless" v-model="view" type="single" variant="outline" class="mb-1 shrink-0">
+                <ToggleGroupItem value="list"><List class="size-4" />{{ t('view.player_list.list') }}</ToggleGroupItem>
+                <ToggleGroupItem value="network"><Network class="size-4" />{{ t('view.player_list.network') }}</ToggleGroupItem>
+            </ToggleGroup>
+            <KeepAlive>
+                <RoomMutualNetwork v-if="headless && view === 'network'" />
+            </KeepAlive>
+            <div v-show="!headless || view === 'list'" class="current-instance-table flex min-h-0 min-w-0 flex-1">
                 <DataTableLayout
                     class="[&_th]:px-2.5! [&_th]:py-0.75! [&_td]:px-2.5! [&_td]:py-0.75! [&_tr]:h-7!"
                     :table="playerListTable"
@@ -181,8 +188,8 @@
 </template>
 
 <script setup>
-    import { computed, onActivated, onMounted, ref, watch } from 'vue';
-    import { Apple, Home, Image, Monitor, Smartphone } from 'lucide-vue-next';
+    import { computed, defineAsyncComponent, onActivated, onMounted, ref, watch } from 'vue';
+    import { Apple, Home, Image, List, Monitor, Network, Smartphone } from 'lucide-vue-next';
     import { storeToRefs } from 'pinia';
     import { useI18n } from 'vue-i18n';
 
@@ -196,6 +203,8 @@
     } from '../../stores';
     import { commaNumber, formatDateFilter } from '../../shared/utils';
     import { Badge } from '../../components/ui/badge';
+    import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group';
+    const RoomMutualNetwork = defineAsyncComponent(() => import('./components/RoomMutualNetwork.vue'));
     import { DataTableLayout } from '../../components/ui/data-table';
     import { createColumns } from './columns.jsx';
     import { useVrcxVueTable } from '../../lib/table/useVrcxVueTable';
@@ -209,6 +218,8 @@
     import { useUserDisplay } from '../../composables/useUserDisplay';
 
     const { randomUserColours } = storeToRefs(useAppearanceSettingsStore());
+    const headless = Boolean(window.__VRCX_HEADLESS__);
+    const view = ref('list');
     const { userImage } = useUserDisplay();
     const photonStore = usePhotonStore();
     const { photonLoggingEnabled, chatboxUserBlacklist } = storeToRefs(photonStore);

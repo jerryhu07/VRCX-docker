@@ -34,7 +34,7 @@ import { runUpdateFriendFlow } from '../coordinators/friendPresenceCoordinator';
 import { runSetCurrentUserLocationFlow } from '../coordinators/locationCoordinator';
 import { watchState } from './watchState';
 import { updateHeadlessConfig } from './headlessBootstrap';
-import { updateLogStreamState } from './logStreamClient';
+import { updateLogStreamState, updateRoomData } from './logStreamClient';
 
 import * as workerTimers from 'worker-timers';
 
@@ -120,6 +120,7 @@ function connectHeadlessEvents() {
         try {
             const payload = JSON.parse(data);
             if (payload.type === 'config-update') { updateHeadlessConfig(payload); return; }
+            if (payload.type === 'room-data') { updateRoomData(payload); return; }
             if (payload.type === 'state' && payload.state) {
                 updateLogStreamState(payload.state);
                 wsState.connected = !!payload.state.websocketConnected;

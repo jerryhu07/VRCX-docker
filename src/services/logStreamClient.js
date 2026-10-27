@@ -1,12 +1,17 @@
 import { reactive } from 'vue';
 
-export const logStreamState = reactive({ clients: [], tokenConfigured: false, initialized: false, playerList: undefined });
+export const logStreamState = reactive({ clients: [], tokenConfigured: false, initialized: false, playerList: undefined, roomNetwork: null });
 export function updateLogStreamState(state) {
     if (!state?.logStream) return;
     logStreamState.clients = state.logStream.clients || [];
     logStreamState.tokenConfigured = !!state.logStream.tokenConfigured;
     logStreamState.initialized = true;
+    updateRoomData(state);
+}
+
+export function updateRoomData(state) {
     if (Object.hasOwn(state, 'playerList')) logStreamState.playerList = state.playerList;
+    if (Object.hasOwn(state, 'roomNetwork')) logStreamState.roomNetwork = state.roomNetwork;
 }
 
 export function latestLogClient(clients = logStreamState.clients) {

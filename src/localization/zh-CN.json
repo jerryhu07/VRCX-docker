@@ -357,6 +357,19 @@
             }
         },
         "player_list": {
+            "list": "列表",
+            "network": "已知关系图",
+            "select_player": "选择玩家",
+            "zoom_in": "放大",
+            "zoom_out": "缩小",
+            "reset_view": "恢复视图",
+            "room_player": "房内玩家",
+            "room_friend": "房内好友",
+            "other_friend": "房外好友",
+            "network_progress": "已获取 {fetched}/{total} 位玩家 · {edges} 条关系",
+            "network_failed": "{count} 位获取失败",
+            "layout_failed": "关系图布局失败",
+            "network_help": "始终显示房内其他玩家。房外好友仅在与房内非好友玩家有联系时显示；隐藏房内好友与房外好友之间的连线。仅显示 API 可见的共同好友关系，没有连线不代表不是好友。省略你本人的好友连线和隐藏用户占位。资料与共同好友在后台一起获取，缓存 12 小时，主动刷新除外。",
             "photon": {
                 "current": "目前",
                 "previous": "上一个",
