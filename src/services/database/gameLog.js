@@ -1531,6 +1531,13 @@ const gameLog = {
      * @returns
      */
     async getInstanceActivity(startDate, endDate) {
+        if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__) {
+            const query = new URLSearchParams({ start: startDate, end: endDate });
+            const response = await fetch(`/headless/instance-activity?${query}`);
+            if (!response.ok) throw new Error(`Instance activity request failed: ${response.status}`);
+            const result = await response.json();
+            return { currentUserData: result.currentUserData, detailData: new Map(result.detailData) };
+        }
         const currentUserData = [];
         const detailData = new Map();
         await sqliteService.execute(

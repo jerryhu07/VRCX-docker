@@ -700,6 +700,10 @@ export const useGameLogStore = defineStore('GameLog', () => {
     function applySessionsSearchFilter(segments) {
         const value = normalizeSessionsSearch(sessionsSearch.value);
         if (!value) {
+            if (typeof window !== 'undefined' && window.__VRCX_HEADLESS__ &&
+                !sessionsVipFilter.value && sessionsEventFilters.value.length === 0) {
+                return segments;
+            }
             return dropEmptySessionsSegments(segments);
         }
 

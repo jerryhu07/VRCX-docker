@@ -576,6 +576,8 @@
         "charts": {
             "instance_activity": {
                 "header": "Instance Activity",
+                "session_online": "Still in this instance",
+                "session_unknown": "Last observed; departure unconfirmed",
                 "online_time": "Online Time",
                 "previous_day": "Previous Day",
                 "next_day": "Next Day",

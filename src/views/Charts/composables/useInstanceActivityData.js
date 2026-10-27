@@ -10,6 +10,7 @@ export function useInstanceActivityData() {
     const activityDetailData = ref([]);
     const allDateOfActivity = ref(new Set());
     const worldNameArray = ref([]);
+    let requestVersion = 0;
 
     async function getAllDateOfActivity() {
         const utcDateStrings =
@@ -30,7 +31,7 @@ export function useInstanceActivityData() {
     async function getWorldNameData() {
         worldNameArray.value = await Promise.all(
             activityData.value.map(async (item) => {
-                return await getWorldName(item.location);
+                return item.world_name || await getWorldName(item.location);
             })
         );
     }
@@ -42,6 +43,7 @@ export function useInstanceActivityData() {
         localFavoriteFriends,
         onActivityDetailReady
     ) {
+        const version = ++requestVersion;
         const localStartDate = dayjs
             .tz(selectedDate.value)
             .startOf('day')
@@ -54,6 +56,7 @@ export function useInstanceActivityData() {
             localStartDate,
             localEndDate
         );
+        if (version !== requestVersion) return;
 
         const transformData = (item) => ({
             ...item,
@@ -102,7 +105,9 @@ export function useInstanceActivityData() {
             .map(transformAndSort)
             .filter((innerArray) => filterByLocation(innerArray, locationSet));
 
-        activityDetailData.value = handleSplitActivityDetailData(
+        activityDetailData.value = typeof window !== 'undefined' && window.__VRCX_HEADLESS__
+            ? preSplitActivityDetailData
+            : handleSplitActivityDetailData(
             preSplitActivityDetailData,
             currentUser.value.id
         );

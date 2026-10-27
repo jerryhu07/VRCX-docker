@@ -4,7 +4,8 @@ const InstanceActivityTooltip = ({
     icon,
     joinTime,
     leaveTime,
-    duration
+    duration,
+    statusLabel
 }) => {
     return (
         <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -24,6 +25,7 @@ const InstanceActivityTooltip = ({
                     {joinTime} - {leaveTime}
                 </div>
                 <div>{duration}</div>
+                {statusLabel && <div>{statusLabel}</div>}
             </div>
         </div>
     );

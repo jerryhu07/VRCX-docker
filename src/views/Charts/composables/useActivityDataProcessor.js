@@ -11,16 +11,10 @@ export function useActivityDataProcessor(
     selectedDate
 ) {
     const totalOnlineTime = computed(() => {
-        return activityData.value?.reduce((acc, item, idx) => {
-            // If the joinTime of the first data is on the previous day,
-            // and the data traverses midnight, the duration starts at midnight
-            if (idx === 0) {
-                const midnight = dayjs.tz(selectedDate.value).startOf('day');
-                if (midnight.isAfter(item.joinTime)) {
-                    return item.leaveTime - dayjs.tz(midnight).valueOf();
-                }
-            }
-            return acc + item.time;
+        const start = dayjs.tz(selectedDate.value).startOf('day').valueOf();
+        const end = dayjs.tz(selectedDate.value).add(1, 'day').startOf('day').valueOf();
+        return activityData.value?.reduce((acc, item) => {
+            return acc + Math.max(0, Math.min(end, item.leaveTime.valueOf()) - Math.max(start, item.joinTime.valueOf()));
         }, 0);
     });
 

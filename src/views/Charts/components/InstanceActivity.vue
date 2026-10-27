@@ -437,7 +437,7 @@
 
             await nextTick();
 
-            echartsInstance.off('click');
+            echartsInstance?.off('click');
 
             if (echartsInstance && activityData.value.length) {
                 const chartsHeight = activityData.value.length * (barWidth.value + 10) + 200;
@@ -604,7 +604,11 @@
                     icon: location.accessTypeName,
                     joinTime: dayjs(instanceData.joinTime).format(format),
                     leaveTime: dayjs(instanceData.leaveTime).format(format),
-                    duration: timeToText(param.data, true)
+                    duration: timeToText(param.data, true),
+                    statusLabel: instanceData.session_status === 'online'
+                        ? t('view.charts.instance_activity.session_online')
+                        : instanceData.session_status === 'unknown'
+                          ? t('view.charts.instance_activity.session_unknown') : ''
                 })
             );
         };
@@ -674,14 +678,8 @@
                             color: 'transparent'
                         }
                     },
-                    data: activityData.value.map((item, idx) => {
-                        if (idx === 0) {
-                            const midnight = dayjs.tz(selectedDate.value).startOf('day');
-                            if (midnight.isAfter(item.joinTime)) {
-                                return 0;
-                            }
-                        }
-                        return item.joinTime - dayjs.tz(selectedDate.value).startOf('day').valueOf();
+                    data: activityData.value.map((item) => {
+                        return Math.max(0, item.joinTime - dayjs.tz(selectedDate.value).startOf('day').valueOf());
                     })
                 },
                 {
@@ -699,16 +697,10 @@
                         shadowOffsetX: 0.7,
                         shadowOffsetY: 0.5
                     },
-                    data: activityData.value.map((item, idx) => {
-                        // If the joinTime of the first data is on the previous day,
-                        // and the data traverses midnight, the duration starts at midnight
-                        if (idx === 0) {
-                            const midnight = dayjs.tz(selectedDate.value).startOf('day');
-                            if (midnight.isAfter(item.joinTime)) {
-                                return item.leaveTime - dayjs.tz(midnight).valueOf();
-                            }
-                        }
-                        return item.time;
+                    data: activityData.value.map((item) => {
+                        const start = dayjs.tz(selectedDate.value).startOf('day').valueOf();
+                        const end = dayjs.tz(selectedDate.value).add(1, 'day').startOf('day').valueOf();
+                        return Math.max(0, Math.min(end, item.leaveTime.valueOf()) - Math.max(start, item.joinTime.valueOf()));
                     })
                 }
             ],

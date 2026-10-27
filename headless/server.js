@@ -10,6 +10,7 @@ const WebSocketClient = require('ws');
 const schemas = require('./schema.json');
 const { installerConfigTrailer } = require('./installerConfig.cjs');
 const { validateLogClientSettings } = require('./logClientSettings.cjs');
+const { buildInstanceActivity } = require('./instanceActivity.cjs');
 const { WebSocketServer } = WebSocketClient;
 
 const rootDir = path.resolve(__dirname, '..');
@@ -4460,6 +4461,7 @@ class HeadlessSession {
                 if (message.machineId && String(message.machineId) !== machineId) throw new Error('Client ID cannot change within a connection');
                 const client = this.getLogStreamClient(machineId);
                 if (message.type === 'hello' || message.type === 'heartbeat') {
+                    const previousRunning = client.vrchatRunning;
                     if (message.status) this.applyClientStatus(client, message.status);
                     client.connected = true;
                     client.currentFile =
@@ -4477,6 +4479,7 @@ class HeadlessSession {
                         })
                     );
                     this.broadcast({ type: 'state', state: this.state() });
+                    if (previousRunning !== client.vrchatRunning) this.broadcast({ type: 'game-log-refresh' });
                     return;
                 }
 
@@ -4515,6 +4518,8 @@ class HeadlessSession {
     }
 
     applyClientStatus(client, status) {
+        if (status.vrchatRunning === false && client.vrchatRunning !== false) client.gameStoppedAt = new Date().toISOString();
+        if (status.vrchatRunning === true) client.gameStoppedAt = '';
         for (const key of ['vrchatRunning', 'debugLoggingEnabled']) client[key] = typeof status[key] === 'boolean' ? status[key] : null;
         for (const key of ['clientVersion', 'platform', 'statusError', 'logDir', 'stateFile']) {
             client[key] = typeof status[key] === 'string' ? status[key].slice(0, 1024) : '';
@@ -5176,6 +5181,38 @@ class HeadlessSession {
 }
 
 async function handleHeadlessRoute(req, res, url) {
+    if (req.method === 'GET' && url.pathname === '/headless/instance-activity') {
+        const start = Date.parse(url.searchParams.get('start'));
+        const end = Date.parse(url.searchParams.get('end'));
+        if (!session.currentUser?.id) { jsonResponse(res, 401, { error: 'Not logged in' }); return true; }
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end - start > 2 * 86400000) {
+            jsonResponse(res, 400, { error: 'Invalid activity date range' }); return true;
+        }
+        try {
+            const locations = await session.sqliteExecute(`WITH segments AS (
+                SELECT id, created_at, location, world_name, time,
+                    LEAD(created_at) OVER (ORDER BY created_at, id) AS next_at
+                FROM gamelog_location WHERE location != '' AND location != 'traveling'
+            ) SELECT * FROM segments WHERE created_at <= @end AND (next_at IS NULL OR next_at >= @start)
+                ORDER BY created_at`, { '@start': new Date(start).toISOString(), '@end': new Date(end).toISOString() });
+            if (!locations.length) { jsonResponse(res, 200, { currentUserData: [], detailData: [] }); return true; }
+            const args = { '@start': new Date(Date.parse(locations[0][1]) - 30000).toISOString(),
+                '@end': new Date(Math.min(end, Date.now())).toISOString() };
+            const events = await session.sqliteExecute(`SELECT id, created_at, type, display_name, location, user_id, time
+                FROM gamelog_join_leave WHERE created_at BETWEEN @start AND @end ORDER BY created_at, id`, args);
+            const rawEvents = await session.sqliteExecute(`SELECT file_name, file_offset, logged_at, data
+                FROM headless_log_stream_events WHERE logged_at BETWEEN @start AND @end
+                AND event_type IN ('location', 'location-destination', 'player-joined', 'player-left')
+                ORDER BY file_name, file_offset`, args);
+            const result = buildInstanceActivity({ locations, events, rawEvents,
+                clients: Array.from(session.logStreamClients.values()), user: session.currentUser });
+            result.currentUserData = result.currentUserData.filter((row) => Date.parse(row.created_at) >= start);
+            const ids = new Set(result.currentUserData.map((row) => row.session_id));
+            result.detailData = result.detailData.filter(([id]) => ids.has(id));
+            jsonResponse(res, 200, result);
+        } catch (err) { jsonResponse(res, 500, { error: safeError(err) }); }
+        return true;
+    }
     if (req.method === 'GET' && url.pathname === '/headless/log-stream/installer.exe') {
         if (!session.loggedIn || process.env.VRCX_LOG_STREAM_ALLOW_TOKEN_READ === '0') {
             jsonResponse(res, 403, { error: { message: 'Installer configuration download is disabled or backend login is required.' } });

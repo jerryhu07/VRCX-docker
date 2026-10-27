@@ -575,6 +575,8 @@
         "charts": {
             "instance_activity": {
                 "header": "活动记录",
+                "session_online": "仍在此房间",
+                "session_unknown": "最后观测时间；尚未确认离场",
                 "online_time": "在线时长",
                 "previous_day": "前一天",
                 "next_day": "后一天",

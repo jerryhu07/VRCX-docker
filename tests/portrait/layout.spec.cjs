@@ -293,6 +293,45 @@ test('closing a loading user dialog cannot be undone by a late profile response'
     await expect(page.locator('[data-slot="dialog-content"]')).toHaveCount(0);
 });
 
+test('activity charts paint real pixels and rotate without refetching', async ({ page }, testInfo) => {
+    let requests = 0;
+    await page.route('**/headless/instance-activity?**', (route) => {
+        requests++;
+        const start = Date.parse(new URL(route.request().url()).searchParams.get('start')) + 8 * 3600000;
+        const self = { id: 'self:fixture', session_id: 1, created_at: new Date(start + 3600000).toISOString(),
+            type: 'OnPlayerLeft', location: 'fixture:1', world_name: 'Portrait chart fixture',
+            user_id: bootstrap.currentUser.id, display_name: 'Self', time: 3600000, session_status: 'closed' };
+        const friend = { ...self, id: 'friend:fixture', user_id: 'usr_fixture', display_name: 'Long participant name',
+            time: 1800000, still_present_at_self_leave: true };
+        return route.fulfill({ json: { currentUserData: [self], detailData: [[1, [self, friend]]] } });
+    });
+    await open(page, 'charts/instance', { width: 390, height: 844 });
+    const canvas = page.locator('.portrait-chart canvas').first();
+    await expect(canvas).toBeVisible();
+    const paintedBars = () => canvas.evaluate((el) => {
+        const pixels = el.getContext('2d').getImageData(0, 0, el.width, el.height).data;
+        const scale = el.width / el.getBoundingClientRect().width;
+        let painted = 0;
+        for (let y = Math.ceil(40 * scale); y < el.height - 70 * scale; y++) {
+            for (let x = Math.ceil(100 * scale); x < el.width - 16 * scale; x++) {
+                const i = (y * el.width + x) * 4;
+                if (pixels[i + 3] && Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) - Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) > 30) painted++;
+            }
+        }
+        return painted;
+    });
+    await expect.poll(paintedBars).toBeGreaterThan(50);
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(page.locator('html')).toHaveAttribute('data-layout', 'landscape');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('html')).toHaveAttribute('data-layout', 'portrait');
+    await expect.poll(paintedBars).toBeGreaterThan(50);
+    expect(requests).toBe(1);
+    const greeting = page.locator('.noty_bar').first();
+    if (await greeting.isVisible()) await greeting.click();
+    await page.screenshot({ path: `build/portrait-qa/${testInfo.project.name}/instance-activity-fixture.png` });
+});
+
 test('player list renders backend snapshot and processes live joins/leaves without database replay', async ({ page }) => {
     const id = 'usr_00000000-0000-4000-8000-000000000001';
     const snapshot = { ownerId: bootstrap.currentUser.id, location: '', name: '', date: 1000,

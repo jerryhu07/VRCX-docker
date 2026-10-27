@@ -24,6 +24,7 @@
     watch(isPortrait, async () => { await nextTick(); if (echartsInstance) initEcharts(); });
     import { DataTableEmpty } from '@/components/ui/data-table';
     import { storeToRefs } from 'pinia';
+    import { useI18n } from 'vue-i18n';
 
     import dayjs from 'dayjs';
 
@@ -38,6 +39,7 @@
     const { isDarkMode, dtHour12 } = storeToRefs(useAppearanceSettingsStore());
 
     const { currentUser } = storeToRefs(useUserStore());
+    const { t } = useI18n();
 
     const props = defineProps({
         activityDetailData: {
@@ -403,7 +405,10 @@
                     icon: friendOrFavIcon(instanceData.display_name),
                     joinTime: dayjs(instanceData.joinTime).format(format),
                     leaveTime: dayjs(instanceData.leaveTime).format(format),
-                    duration: timeToText(instanceData.time, true)
+                    duration: timeToText(instanceData.time, true),
+                    statusLabel: instanceData.user_id !== currentUser.value.id ? ''
+                        : instanceData.session_status === 'online' ? t('view.charts.instance_activity.session_online')
+                          : instanceData.session_status === 'unknown' ? t('view.charts.instance_activity.session_unknown') : ''
                 })
             );
         };
